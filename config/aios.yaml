@@ -1,0 +1,7 @@
+version: 1
+control_plane: 127.0.0.1:8081
+runtime: 127.0.0.1:8090
+open_webui: 127.0.0.1:8080
+storage: /var/lib/aios
+database: sqlite-wal
+update_policy: manual-signed

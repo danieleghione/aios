@@ -1,0 +1,7 @@
+[Unit]
+Description=AIOS hardware profile refresh
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+[Install]
+WantedBy=timers.target

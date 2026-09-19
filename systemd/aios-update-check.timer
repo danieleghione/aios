@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for operating system updates shortly after boot and daily
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+RandomizedDelaySec=30min
+Persistent=true
+[Install]
+WantedBy=timers.target

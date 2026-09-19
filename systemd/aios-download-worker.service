@@ -1,0 +1,38 @@
+[Unit]
+Description=AIOS download worker
+After=aios-firstboot.service network.target
+Requires=aios-firstboot.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=aios
+Group=aios
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/opt/aios/app
+Environment=PYTHONPATH=/opt/aios/app/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=LD_LIBRARY_PATH=/opt/aios/runtime/lib
+EnvironmentFile=-/etc/aios/proxy.env
+ExecStart=/opt/aios/venv/bin/python -m aios downloads
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/aios /etc/aios /var/log/aios
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+LimitMEMLOCK=infinity
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

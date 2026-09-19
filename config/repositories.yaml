@@ -1,0 +1,9 @@
+# Initial provider inventory. Runtime configuration is authoritative in SQLite.
+providers:
+  - huggingface
+  - modelscope
+  - github
+  - http
+  - internal
+sync_interval_hours: 6
+auto_install: false

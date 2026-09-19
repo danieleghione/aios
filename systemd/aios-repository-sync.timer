@@ -1,0 +1,9 @@
+[Unit]
+Description=AIOS scheduled metadata discovery
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=60
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,28 @@
+# AIOS installer boot menu. The logo is part of the background picture.
+desktop-image: "aios.png"
+desktop-image-scale-method: "stretch"
+desktop-color: "#000000"
+title-text: ""
+terminal-font: "Unifont Regular 16"
++ boot_menu {
+  left = 30%
+  width = 40%
+  top = 62%
+  height = 22%
+  item_font = "Unifont Regular 16"
+  item_color = "#8b9cba"
+  selected_item_color = "#22d3ee"
+  item_height = 34
+  item_padding = 8
+  item_spacing = 6
+}
++ label {
+  id = "__timeout__"
+  left = 0
+  width = 100%
+  top = 82%
+  align = "center"
+  color = "#6b7c99"
+  font = "Unifont Regular 16"
+  text = "Booting automatically in %d seconds"
+}

@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+frontend-admin/dist/
+build/*
+!build/versions.env
+dist/*
+!dist/.gitkeep
+*.egg-info/
+
+*.tsbuildinfo
+.vscode/

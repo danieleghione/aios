@@ -1,0 +1,12 @@
+[Unit]
+Description=AIOS console readiness and bootstrap information
+After=aios-control-plane.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/opt/aios/app/scripts/console.sh
+StandardOutput=tty
+TTYPath=/dev/console
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

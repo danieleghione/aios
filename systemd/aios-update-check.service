@@ -1,0 +1,9 @@
+[Unit]
+Description=AIOS operating system update check
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/opt/aios/app/installer/updates.sh check
+Nice=10
+IOSchedulingClass=idle

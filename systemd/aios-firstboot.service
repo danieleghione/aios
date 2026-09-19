@@ -1,0 +1,13 @@
+[Unit]
+Description=AIOS first boot and persistent data expansion
+After=local-fs.target network.target
+Before=aios-control-plane.service aios-open-webui.service nginx.service
+RequiresMountsFor=/var/lib/aios
+[Service]
+Type=oneshot
+ExecStart=/opt/aios/app/scripts/firstboot.sh
+RemainAfterExit=yes
+TimeoutStartSec=300
+StandardOutput=journal
+[Install]
+WantedBy=multi-user.target

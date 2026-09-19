@@ -1,0 +1,18 @@
+[Unit]
+Description=AIOS physical console installer and recovery
+After=aios-console.service
+Conflicts=getty@tty1.service
+[Service]
+# Close the boot splash when the menu is ready to be drawn.
+ExecStartPre=-/usr/bin/plymouth quit
+ExecStart=/opt/aios/app/installer/console.sh
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

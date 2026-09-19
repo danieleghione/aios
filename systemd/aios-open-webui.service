@@ -1,0 +1,30 @@
+[Unit]
+Description=AIOS Open WebUI
+After=aios-firstboot.service aios-control-plane.service
+Requires=aios-firstboot.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+[Service]
+User=aios-webui
+Group=aios-webui
+EnvironmentFile=/etc/aios/webui.env
+Environment=HOME=/var/lib/aios/webui
+Environment=XDG_CACHE_HOME=/var/lib/aios/webui/cache
+Environment=HF_HOME=/var/lib/aios/webui/cache/huggingface
+Environment=NLTK_DATA=/opt/aios/nltk_data
+ExecStart=/opt/aios/webui/bin/open-webui serve --host 127.0.0.1 --port 8080
+WorkingDirectory=/var/lib/aios/webui
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/aios/webui
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+UMask=0077
+[Install]
+WantedBy=multi-user.target

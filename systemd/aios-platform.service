@@ -1,0 +1,14 @@
+[Unit]
+Description=AIOS privileged operation broker
+After=aios-firstboot.service
+Requires=aios-firstboot.service
+[Service]
+ExecStart=/opt/aios/venv/bin/python -m aios platform
+Environment=PYTHONPATH=/opt/aios/app/backend
+Restart=on-failure
+RestartSec=10
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+[Install]
+WantedBy=multi-user.target

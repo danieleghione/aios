@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=AIOS
+Description=AIOS boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/aios
+ScriptFile=/usr/share/plymouth/themes/aios/aios.script

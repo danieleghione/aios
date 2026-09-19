@@ -1,0 +1,14 @@
+[Unit]
+Description=AIOS NVIDIA kernel modules matching the installed cards
+After=systemd-udev-settle.service local-fs.target
+Before=aios-runtime-manager.service aios-hardware-profiler.service
+ConditionPathIsDirectory=/opt/aios/drivers/nvidia
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/aios/app/scripts/nvidia-driver.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
