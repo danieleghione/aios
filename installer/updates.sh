@@ -3,7 +3,7 @@
 # Ubuntu archive offers, "apply" installs it. Only root runs this (console and
 # timer); the result is a small status file the console reads.
 set -Eeuo pipefail
-STATUS=/var/lib/aios/system/updates.json
+STATUS=${AIOS_UPDATES_STATUS:-/var/lib/aios/system/updates.json}
 APT=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p "$(dirname "$STATUS")"
@@ -35,7 +35,22 @@ case "${1:-}" in
     echo 'Installing updates (do not power off the system)...'
     # New dependencies (such as a new kernel) are installed, nothing is removed,
     # and configuration files the appliance manages are kept as they are.
-    apt-get "${APT[@]}" -y --with-new-pkgs -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef upgrade
+    # The archive is served by several mirrors that are not always in step: a
+    # package the index just listed can answer 404 for a few minutes. What was
+    # downloaded stays in the cache; read the index again and try once more.
+    for attempt in 1 2 3; do
+      if apt-get "${APT[@]}" -y --with-new-pkgs -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef upgrade; then
+        break
+      fi
+      if (( attempt == 3 )); then
+        check || true
+        echo 'Updates could not be installed; try again later.'
+        exit 1
+      fi
+      echo "The archive did not serve every package; trying again in a minute (attempt $((attempt + 1)) of 3)..."
+      sleep "${AIOS_UPDATES_RETRY_WAIT:-60}"
+      timeout 600 apt-get "${APT[@]}" -qq update >/dev/null 2>&1 || true
+    done
     apt-get clean
     check || true
     if [[ -f /run/reboot-required ]]; then

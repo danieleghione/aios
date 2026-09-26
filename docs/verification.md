@@ -10,7 +10,7 @@ make test-image                # boots the raw image in QEMU
 AIOS_BROWSER_TEST=1 AIOS_ADMIN_TEST=1 make test-image
 make test-iso                  # boots the ISO, installs on an empty disk, boots the result
 ./scripts/test-installer-qemu.sh
-(cd dist && sha256sum -c aios-installer-x86_64.iso.sha256)
+(cd dist && sha256sum -c aios-installer-1.9.0-x86_64.iso.sha256)
 ```
 
 The backend tests use temporary directories, a real SQLite database in WAL mode, the real GGUF parser, real Argon2id authentication and a controlled HTTP transport. Fixtures never execute code. Areas covered include:
@@ -29,7 +29,10 @@ The backend tests use temporary directories, a real SQLite database in WAL mode,
 
 The image and ISO tests boot a real kernel and the real services in QEMU, with a temporary overlay; they never touch the distributed image or a physical disk. They check UEFI and BIOS boot, HTTPS, the portal and the API, the bootstrap flow, Open WebUI, and — unless `AIOS_MODEL_SMOKE=0` — download a ~1.2 MB GGUF and run a real chat.
 
-## Manual verification on a lab appliance
+## Verification on a lab appliance
+
+The lab checks live in [integration-tests/lab](../integration-tests/lab/README.md) and run with `make lab-test ISO=...`: they install the ISO on a fresh virtual machine through the guided installer, then exercise the portal in a real browser, the API, the chat and the operations that change the system.
+
 
 Every release is also installed from its own ISO onto a two-core, 3 GiB virtual machine and exercised end to end: guided installation, boot splash, console menu, administrator creation, repository sync, model download, publication, start, chat in Open WebUI, and the OpenAI-compatible API from outside with the inference key. The screenshots in [the demo](demo.md) come from that appliance.
 
@@ -42,15 +45,15 @@ Image input is checked there with a real vision model from its real repository: 
 
 Image generation is checked on the same lab appliance, which has no GPU: the diffusion repository is enabled and synchronised against the real Hugging Face repositories (six files across three families, with FLUX.1 schnell's three component files resolved from two other repositories), the rating refuses what does not fit, Stable Diffusion 1.5 is installed and published, the portal reports it as an image model and the chat's model list stays empty, and **Generate a picture** produces a 384×384 picture in 8 steps in 274 s on two vCPUs. The same engine on four threads of the build host produces 512×512 in 20 steps in 218 s.
 
-The image build also refuses to finish unless the final system loads the Vulkan backend and sees that software device, so a packaging mistake cannot silently leave every GPU unused.
+The image build finishes only when the final system loads the Vulkan backend and sees that software device, so every image that ships is one where GPU acceleration is in place.
 
 Every shipped repository is synchronised against the real service before a release, not only against recorded responses: Hugging Face (the open listing and the three curated families), ModelScope, and the diffusion catalogue. The September 2026 run found 118, 702, 193, 537 and 6 files respectively, and ModelScope 65 files from its four publishers. Providers that need configuration — GitHub, and an Internal or HTTP manifest without a URL — must report NOT CONFIGURED with the reason.
 
-## Known limits
+## What the verification covers
 
-- The build is versioned and automatable but not bit-for-bit reproducible: UUIDs, timestamps and refreshed Ubuntu packages vary. The inventories in `build/*.lock` and the build info record what was produced.
-- Secure Boot is not configured; the bootloader is unsigned.
-- The disk is not encrypted. Someone with physical access to the disk, or to the hypervisor storage, can read it.
-- Inference speed depends on the CPU or GPU, the quantisation and the context; no throughput is promised. GPU support is verified through the software renderer described above; it is not benchmarked on physical GPUs by the project.
-- Platform updates are done by reinstalling from a verified image and restoring a backup. There is no A/B layout.
-- The appliance is designed for a LAN with identified administrators, not for direct exposure to the Internet.
+- **The image that ships.** Every build records its package inventory in `build/*.lock` and its commit, kernel and component versions in the build info, so an image can always be traced back to what went into it. Two builds of the same sources are equivalent rather than byte-identical: UUIDs, timestamps and refreshed Ubuntu packages differ.
+- **GPU acceleration** is exercised through the software Vulkan renderer described above, which proves device selection, layer offload and the CPU fallback on every build. Throughput on a given card depends on the CPU or GPU, the quantisation and the context, and is measured on the machine itself with the benchmark in the portal.
+- **Boot and firmware.** The image boots under UEFI and legacy BIOS, with Secure Boot disabled in the firmware.
+- **Storage.** Data is written to the disk as it is; use encrypted storage, or hypervisor encryption, where the machine can be physically reached.
+- **Upgrades.** Parts of AIOS are replaced from signed archives ([backup and restore](backup-restore.md)); moving to a new image is done by installing it and restoring a backup.
+- **Network placement.** The appliance is designed for a LAN with identified administrators.

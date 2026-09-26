@@ -160,3 +160,8 @@ def test_mismatched_ssh_password_is_asked_again(monkeypatch):
     result = config.collect(['ens18'])
     assert left == [] and result['ssh_user'] == 'recovery' and result['ssh_password'] == 'Long-enough-password-1'
     assert any('do not match' in line for line in printed)
+
+
+def test_internal_notes_are_not_shipped_in_the_image():
+    build = (Path(__file__).resolve().parents[1] / 'scripts/build-image.sh').read_text()
+    assert all(f'--exclude={d}' in build for d in ('internal', 'tests', 'integration-tests', '.github')) and 'rm -rf "$ROOT/opt/aios/app/internal" "$ROOT/opt/aios/app/tests"' in build

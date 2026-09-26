@@ -1,5 +1,6 @@
 """Optical installation acceptance on both the UEFI and the legacy BIOS firmware paths."""
 import json
+import secrets
 import os
 import re
 import shutil
@@ -10,11 +11,15 @@ import time
 from pathlib import Path
 import httpx
 
+# The administrator this test creates on the throwaway VM.
+PASSWORD = secrets.token_urlsafe(18)
+
 ROOT=Path(__file__).resolve().parents[1]
 WORK=ROOT/'build/iso-test'
 WORK.mkdir(parents=True,exist_ok=True)
 os.chmod(WORK,0o700)
-ISO=ROOT/'dist/aios-installer-x86_64.iso'
+VERSION=dict(line.split('=',1) for line in (ROOT/'build/versions.env').read_text().split())['AIOS_VERSION']
+ISO=ROOT/f'dist/aios-installer-{VERSION}-x86_64.iso'
 TARGET=WORK/'target.qcow2'
 log=WORK/'serial.log'
 # The BIOS profile reproduces what Proxmox configures by default for a new VM:
@@ -141,7 +146,7 @@ def run(profile):
     secret=re.search(r'Bootstrap secret: (\S+)',output).group(1)
     with httpx.Client(base_url='https://127.0.0.1:20443',verify=False,timeout=60) as client:
         created=client.post('/api/v1/aios/auth/bootstrap',json={'username':'admin@example.com',
-            'password':'Testing-password-937!','secret':secret})
+            'password':PASSWORD,'secret':secret})
         assert created.status_code==200,created.text
     checks.append(f'{name}: the bootstrap secret creates the first administrator, with an email as username')
     refused=ssh_recovery()
@@ -163,7 +168,7 @@ def run(profile):
     console.sendall(b'2\n')
     wait('AIOS user',30,offset)
     offset=len(log.read_text(errors='replace'))
-    console.sendall(b'admin@example.com\nTesting-password-937!\n')
+    console.sendall(b'admin@example.com\n' + PASSWORD.encode() + b'\n')
     wait('Authorised: admin@example.com',60,offset)
     checks.append(f'{name}: the administrator password authorises the action and is recorded in the audit trail')
     shutdown()

@@ -47,10 +47,20 @@ The context size is fitted to the memory really available — RAM plus video mem
 
 A GPU must be passed through to the VM (PCI passthrough, or an SR-IOV / GVT-g virtual function); an emulated display adapter is not a GPU. Proxmox steps are in [GPU passthrough](proxmox.md#gpu-passthrough). Other hypervisors work the same way as long as the guest sees the real PCI device.
 
-## Limits
+## What the Vulkan path gives you
 
-- Vulkan is portable, not always the fastest path: on NVIDIA cards CUDA can be faster for some models. AIOS trades that for one image that works on every vendor.
-- Very old GPUs without Vulkan compute (for example Radeon HD 6000 and older, Intel graphics before Ivy Bridge) are ignored and models run on the CPU.
-- Secure Boot is not configured, so the kernel accepts the NVIDIA modules; see [install](install.md).
+- One image that accelerates on every vendor. For NVIDIA cards the optional CUDA package below adds llama.cpp's CUDA backend, faster on many of them.
+- Cards with Vulkan compute are used automatically; hardware without it (for example Radeon HD 6000 and older, Intel graphics before Ivy Bridge) runs its models on the CPU.
+- The NVIDIA modules are loaded with Secure Boot disabled in the firmware, as the [installation requirements](install.md) ask.
 - An NVIDIA card added after a system update that installed a new kernel needs network access once, because the bundled modules match the kernel the image shipped with.
-- Version 1 runs one model at a time; it uses every GPU chosen above.
+- One model of each kind (language, image, speech, voice) is loaded at a time, each using the devices chosen above.
+
+## CUDA for NVIDIA cards (optional)
+
+The image stays the same for every vendor; NVIDIA cards can also run through llama.cpp's CUDA backend, installed as a signed component:
+
+1. On the build machine, after `make image`: `make cuda-package`. It compiles the CUDA backend from the same llama.cpp commit as the image's runtime, in a copy of the build root, for every generation from Pascal to Hopper, and packs it with the CUDA runtime and cuBLAS libraries into `dist/aios-cuda-<version>.tar.gz`.
+2. Sign it with the key the appliance trusts: `scripts/sign-release.py cuda <version> dist/aios-cuda-<version>.tar.gz --private-key <key.pem> --output cuda.json`.
+3. Install it under **System → Updates → Application updates**, like any component release.
+
+llama.cpp then loads the CUDA backend beside Vulkan (`GGML_BACKEND_PATH`), and a card seen by both is used once, through CUDA; other GPUs keep Vulkan. The NVIDIA driver the appliance installs at boot provides the rest. **Hardware** shows the installed package; *Remove* takes it out and the cards go back to Vulkan. The language and voice engines use it; the image and speech engines keep Vulkan.

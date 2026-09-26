@@ -2,14 +2,15 @@
 import asyncio
 import ipaddress
 import json
-import logging
 import re
 import socket
 import time
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 import httpx
-from .gguf import draft_reason, not_a_model
-from .core import ETC, audit, encode, execute, now, one, rows, setting, uid
+from ..gguf import draft_reason, not_a_model
+from ..voice import is_voice_architecture
+from .. import alerts, revisions
+from ..core import ETC, audit, encode, execute, now, one, rows, setting, uid
 
 MAX_METADATA = 8 * 1024 * 1024
 
@@ -86,6 +87,7 @@ _STRUCTURE = ('target_layers', 'nextn_predict_layers')
 # Files differing only in quantisation share one layout, so one header read covers them.
 QUANTISATION = re.compile(r'(?:IQ|TQ|MXFP|BF|FP|Q|F)[0-9][A-Za-z0-9_]*', re.I)
 HEADER_READS_PER_MODEL = 16
+NO_ARCHITECTURE = 'no architecture'
 
 
 def header_dimensions(data):
@@ -124,11 +126,13 @@ def header_dimensions(data):
             return max(items) if keep and items else None
         raise EOFError
 
+    scanned = False
     try:
         if bytes(take(4)) != b'GGUF' or number('I') not in (2, 3):
             return {}
         tensors = number('Q')
-        for _ in range(min(number('Q'), 10000)):
+        count = number('Q')
+        for _ in range(min(count, 10000)):
             key = text()
             architecture = found.get('general.architecture')
             # The vocabulary is the bulk of a header; everything that tells a model's
@@ -139,9 +143,14 @@ def header_dimensions(data):
             result = value(number('I'), wanted)
             if wanted and result is not None:
                 found[key] = result
-
+        scanned = count <= 10000
     except (EOFError, ValueError, struct.error):
         pass
+    if scanned and 'general.architecture' not in found and not not_a_model(found):
+        # Every key was read and none names an architecture: a GGUF written for
+        # another engine (diffusion models converted for stable-diffusion.cpp
+        # carry tensors and no metadata). llama.cpp cannot load it.
+        return {'general.type': NO_ARCHITECTURE, 'tensor_count': tensors}
     if 'general.architecture' not in found and not not_a_model(found):
         return {}
     found['tensor_count'] = tensors
@@ -225,7 +234,10 @@ async def attach_dimensions(items, repo):
                 continue
         if not dimensions:
             continue
-        if not_a_model(dimensions) or ('tensor_count' in dimensions and draft_reason(dimensions['general.architecture'], dimensions, dimensions['tensor_count'])):
+        # A voice backbone is a GGUF model too, but it speaks rather than chats:
+        # the voice repository offers it with its codec.
+        if not_a_model(dimensions) or is_voice_architecture(dimensions.get('general.architecture')) or \
+                ('tensor_count' in dimensions and draft_reason(dimensions['general.architecture'], dimensions, dimensions['tensor_count'])):
             drafts.update(id(item) for item in group)
             continue
         for item in group:
@@ -233,6 +245,26 @@ async def attach_dimensions(items, repo):
             if item.get('architecture') in (None, '', 'unknown'):
                 item['architecture'] = dimensions['general.architecture']
     items[:] = [item for item in items if id(item) not in drafts]
+
+
+# "Qwen3-30B-A3B", "Mixtral-8x7B", "SmolLM2-360M", "gemma-3n-E4B": publishers
+# put the size in the name far more often than in the metadata.
+_PARAMS = re.compile(r'(?<![A-Za-z0-9.])(?:(\d+)x)?E?(\d+(?:\.\d+)?)([BM])(?:-A(\d+(?:\.\d+)?)B)?(?![A-Za-z0-9])', re.I)
+
+
+def parameters_from_name(*names):
+    """Total and active parameters read from a model or file name, or (None, None)."""
+    for name in names:
+        for match in _PARAMS.finditer(str(name or '').replace('_', '-')):
+            experts, value, unit, active = match.groups()
+            count = float(value) * (1e9 if unit.upper() == 'B' else 1e6)
+            if unit.upper() == 'M' and count < 1e8:
+                continue  # "1M" is a context length, not a model size
+            if count > 5e12:
+                continue
+            count *= int(experts or 1)
+            return int(count), int(float(active) * 1e9) if active else None
+    return None, None
 
 
 def artifact(model_id, filename, url, size, sha=None, revision='', **extra):
@@ -259,6 +291,10 @@ def artifact(model_id, filename, url, size, sha=None, revision='', **extra):
     if sha and (not isinstance(sha, str) or not re.fullmatch('[0-9a-fA-F]{64}', sha)):
         raise RepositoryError('Invalid SHA256')
     quant = re.search(r'(?:IQ|TQ|MXFP|BF|FP|Q|F)[0-9][A-Za-z0-9_]*', filename, re.I)
+    if extra.get('parameter_count') is None:
+        total, active = parameters_from_name(model_id.split('/')[-1], filename.rsplit('/', 1)[-1])
+        if total:
+            extra = {**extra, 'parameter_count': total, 'parameter_source': 'name', **({'active_parameters': active} if active else {})}
     return {'model_id': model_id, 'display_name': model_id + ' / ' + filename.rsplit('/', 1)[-1], 'filename': filename, 'url': url, 'size': size, 'sha256': sha, 'revision': revision, 'format': 'GGUF', 'quantization': quant.group(0) if quant else 'unknown', 'author': model_id.split('/')[0], 'architecture': 'unknown', 'family': model_id, 'parameter_count': None, 'license': 'unknown', **extra}
 
 # llama.cpp names vision projectors mmproj-*.gguf and shards *-00001-of-0000N.gguf.
@@ -364,281 +400,6 @@ def projector_for(model_id):
     return None
 
 
-# Repositories that are a quantised copy of someone else's work with its safety
-# tuning removed, or that are not chat models at all.
-EXCLUDED_NAMES = ('uncensored', 'abliterated', 'heretic', 'nsfw', 'lewd', 'erotic', 'roleplay',
-                  'dolphin', '-tts', '-asr', 'ocr-', '-ocr', 'embedding', 'reranker', '-base-gguf')
-
-
-async def latest_from_publishers(repo, config):
-    """GGUF repositories from named publishers, optionally narrowed by name, newest
-    first. A fixed model list never sees a release that postdates it, and a plain
-    name search across all of Hugging Face surfaces mostly anonymous re-uploads
-    and modified copies; publishers plus a family keyword stays current and vetted."""
-    base = repo['url'].rstrip('/') + '/api/models?'
-    terms = config.get('search') or ['']
-    terms = [terms] if isinstance(terms, str) else terms
-    excluded = [e.lower() for e in config.get('exclude', EXCLUDED_NAMES)]
-    found = {}
-    for author in list(config['publishers'])[:12]:
-        for term in terms[:8]:
-            query = {'author': author, 'filter': 'gguf', 'sort': 'createdAt', 'direction': -1, 'limit': 40}
-            if term:
-                query['search'] = term
-            for item in await request_json(base + urlencode(query), repo):
-                name = item['id'].lower()
-                if not any(word in name for word in excluded):
-                    found.setdefault(item['id'], item.get('createdAt', ''))
-    return sorted(found, key=found.get, reverse=True)
-
-
-def model_name(repository):
-    """The same model re-quantised by several publishers is one choice, not several."""
-    return repository.rsplit('/', 1)[-1].lower()
-
-
-async def tolerant_model(repo, model):
-    """One model's files, or none if that model alone cannot be read. Upstream
-    repositories change every day: a single deleted, gated or malformed entry
-    used to fail the whole sync and leave the catalog empty. Access and rate
-    limits concern every model, so a rate limit still stops the sync; a gated
-    model answers AUTH REQUIRED on its own while the others stay public."""
-    try:
-        return await huggingface_model(repo, model)
-    except RepositoryError as exc:
-        if str(exc) == 'RATE LIMITED':
-            raise
-        logging.warning('repository %s: skipping %s: %s', repo.get('name'), model, exc)
-    except (ValueError, KeyError, TypeError, AttributeError, httpx.HTTPStatusError) as exc:
-        logging.warning('repository %s: skipping %s: %s', repo.get('name'), model, type(exc).__name__)
-    return []
-
-
-async def huggingface_model(repo, model):
-    data = await request_json(repo['url'].rstrip('/') + '/api/models/' + quote(model, safe='/') + '?blobs=true', repo)
-    model = data.get('id', model)
-    revision = data.get('sha', 'main')
-    result, projectors = [], []
-    for item in data.get('siblings', []):
-        lfs = item.get('lfs') or {}
-        name = item['rfilename']
-        url = repo['url'].rstrip('/') + '/' + quote(model, safe='/') + '/resolve/' + quote(revision, safe='') + '/' + quote(name, safe='/')
-        projector = projector_candidate(name, url, item.get('size', lfs.get('size', 0)), lfs.get('sha256'))
-        if projector:
-            projectors.append(projector)
-            continue
-        row = artifact(model, name, url, item.get('size', lfs.get('size', 0)), lfs.get('sha256'), revision, license=(data.get('cardData') or {}).get('license', 'unknown'), architecture=(data.get('gguf') or {}).get('architecture', 'unknown'), parameter_count=(data.get('gguf') or {}).get('total'), context=(data.get('gguf') or {}).get('context_length'), release_date=data.get('createdAt') or data.get('lastModified'), upstream_metadata={'tags': data.get('tags', []), 'gguf': data.get('gguf', {})})
-        if row:
-            result.append(row)
-    attach_projectors(result, projectors)
-    return result
-
-
-async def huggingface(repo, emit=None):
-    """Artifacts of the configured Hugging Face models. With emit, each model's
-    files are handed over as soon as they are known, so a long sync fills the
-    catalog as it goes instead of showing nothing until the very end."""
-    config = json.loads(repo['config'])
-    ids = config.get('models', [])
-    if not ids and config.get('publishers'):
-        # 'limit' counts distinct models this appliance can run: every publisher's
-        # copy of a kept model stays (they differ in quantisations), while a model
-        # with nothing runnable, such as one only published split into parts,
-        # does not use up a place.
-        wanted = max(1, min(100, int(config.get('limit', 30))))
-        kept, result = set(), []
-        for model in (await latest_from_publishers(repo, config))[:150]:
-            name = model_name(model)
-            if name not in kept and len(kept) >= wanted:
-                continue
-            rows_found = await tolerant_model(repo, model)
-            if emit and rows_found:
-                rows_found = await emit(rows_found)
-            if rows_found:
-                kept.add(name)
-                result.extend(rows_found)
-        return result
-    if not ids:
-        query = 'filter=gguf&sort=lastModified&direction=-1&limit=30'
-        if config.get('author'):
-            query += '&author=' + quote(config['author'], safe='')
-        listing = await request_json(repo['url'].rstrip('/') + '/api/models?' + query, repo)
-        ids = [item['id'] for item in listing]
-    result = []
-    for model in ids[:100]:
-        rows_found = await tolerant_model(repo, model)
-        if emit and rows_found:
-            rows_found = await emit(rows_found)
-        result.extend(rows_found)
-    return result
-
-# ModelScope has no per-author listing endpoint, but its search matches the
-# publisher's name as well as the model's, so asking for "<publisher> GGUF"
-# returns that publisher's releases, newest first. Checked September 2026.
-MODELSCOPE_SEARCH = '/api/v1/dolphin/models'
-MODELSCOPE_PUBLISHERS = ['Qwen', 'unsloth', 'lmstudio-community', 'ggml-org']
-
-
-async def modelscope_latest(repo, config):
-    """Newest GGUF repositories of the configured publishers, with their licence."""
-    publishers = config.get('publishers') or MODELSCOPE_PUBLISHERS
-    terms = config.get('search') or ['GGUF']
-    terms = [terms] if isinstance(terms, str) else terms
-    excluded = [word.lower() for word in config.get('exclude', EXCLUDED_NAMES)]
-    found = {}
-    for publisher in list(publishers)[:12]:
-        for term in terms[:8]:
-            # Newest first finds this week's releases; relevance finds the
-            # established repositories that a date sort buries under the noise.
-            for order in ('GmtModified', 'Default'):
-                payload = {'PageSize': 40, 'PageNumber': 1, 'SortBy': order, 'Name': f'{publisher} {term}'.strip()}
-                data = await request_json(repo['url'].rstrip('/') + MODELSCOPE_SEARCH, repo, method='PUT', payload=payload)
-                for item in (((data.get('Data') or {}).get('Model') or {}).get('Models') or []):
-                    path, name = str(item.get('Path') or ''), str(item.get('Name') or '')
-                    if path.lower() != str(publisher).lower() or 'gguf' not in name.lower():
-                        continue
-                    if any(word in name.lower() for word in excluded):
-                        continue
-                    found[f'{path}/{name}'] = (item.get('CreatedTime') or 0, item.get('License') or 'unknown')
-    # Newest first within each publisher, then one publisher after another, so a
-    # limit never spends every place on whoever published most this week.
-    by_publisher = {}
-    for key in sorted(found, key=lambda key: found[key][0], reverse=True):
-        by_publisher.setdefault(key.split('/')[0].lower(), []).append(key)
-    ordered, queues = [], [by_publisher[p.lower()] for p in publishers if p.lower() in by_publisher]
-    while queues:
-        for queue in list(queues):
-            ordered.append(queue.pop(0))
-            if not queue:
-                queues.remove(queue)
-    return ordered, {key: found[key][1] for key in found}
-
-
-async def modelscope_model(repo, model, revision, license_name):
-    """One ModelScope repository's files, with the projector that belongs to them."""
-    base = repo['url'].rstrip('/') + '/api/v1/models/' + quote(model, safe='/')
-    data = await request_json(base + '/repo/files?Recursive=true&Revision=' + quote(revision, safe=''), repo)
-    found, projectors = [], []
-    for item in data.get('Data', {}).get('Files', []):
-        name = item.get('Path', '')
-        url = base + '/repo?Revision=' + quote(revision, safe='') + '&FilePath=' + quote(name, safe='')
-        projector = projector_candidate(name, url, item.get('Size', 0), item.get('Sha256'))
-        if projector:
-            projectors.append(projector)
-            continue
-        row = artifact(model, name, url, item.get('Size', 0), item.get('Sha256'), item.get('Revision', revision), license=license_name)
-        if row:
-            found.append(row)
-    attach_projectors(found, projectors)
-    return found
-
-
-async def modelscope(repo, emit=None):
-    """ModelScope models. Without a configured list, the newest GGUF releases of
-    the same trusted publishers the Hugging Face repositories follow."""
-    config = json.loads(repo['config'])
-    revision = config.get('revision', 'master')
-    licences = {}
-    models = config.get('models')
-    if not models:
-        wanted = max(1, min(100, int(config.get('limit', 20))))
-        models, licences = await modelscope_latest(repo, config)
-        models = models[:wanted]
-    result = []
-    for model in list(models)[:100]:
-        try:
-            found = await modelscope_model(repo, model, revision, licences.get(model, config.get('license', 'unknown')))
-        except RepositoryError as exc:
-            if str(exc) == 'RATE LIMITED':
-                raise
-            logging.warning('repository %s: skipping %s: %s', repo.get('name'), model, exc)
-            continue
-        if emit and found:
-            found = await emit(found)
-        result.extend(found)
-    return result
-
-
-async def github(repo):
-    config = json.loads(repo['config'])
-    result = []
-    if not config.get('models'):
-        raise RepositoryError('Configure organization/repository entries in models; GitHub releases are listed per repository')
-    for model in config['models'][:100]:
-        data = await request_json(repo['url'].rstrip('/') + '/repos/' + quote(model, safe='/') + '/releases?per_page=20', repo)
-        for release in data:
-            found, projectors = [], []
-            for item in release.get('assets', []):
-                digest = item.get('digest') or ''
-                sha = digest.removeprefix('sha256:') if digest.startswith('sha256:') else None
-                projector = projector_candidate(item['name'], item['browser_download_url'], item['size'], sha)
-                if projector:
-                    projectors.append(projector)
-                    continue
-                row = artifact(model, item['name'], item['browser_download_url'], item['size'], sha, release['tag_name'], license=config.get('license', 'unknown'), release_date=release.get('published_at'))
-                if row:
-                    found.append(row)
-            attach_projectors(found, projectors)
-            result.extend(found)
-    return result
-
-async def generic(repo):
-    if not (repo['url'] or '').strip():
-        raise RepositoryError('Configure the HTTPS URL of an AIOS manifest for this repository')
-    data = await request_json(repo['url'], repo)
-    if data.get('schema_version') != 1 or not isinstance(data.get('models'), list) or len(data['models']) > 10000:
-        raise RepositoryError('Invalid AIOS manifest')
-    result, projectors = [], {}
-    for item in data['models']:
-        url = urljoin(repo['url'], item['url'])
-        projector = projector_candidate(item['filename'], url, item['size'], item.get('sha256'))
-        if projector:
-            projectors.setdefault(item['model_id'], []).append(projector)
-            continue
-        row = artifact(item['model_id'], item['filename'], url, item['size'], item.get('sha256'), item.get('revision', ''), **{k: item[k] for k in ('license', 'architecture', 'parameter_count', 'author', 'family', 'context', 'release_date') if k in item})
-        if row:
-            result.append(row)
-    for model_id, candidates in projectors.items():
-        attach_projectors([row for row in result if row['model_id'] == model_id], candidates)
-    return result
-
-# Diffusion models are not language models: they are published as one checkpoint
-# or as a transformer plus its text encoders and VAE, sometimes in another
-# repository. Each entry below names what to offer and what it needs to run; a
-# component with several sources uses the first one that can be read without
-# credentials. Checked against Hugging Face in September 2026.
-IMAGE_FAMILIES = [
-    {'name': 'Stable Diffusion 1.5', 'family': 'sd1', 'repo': 'Comfy-Org/stable-diffusion-v1-5-archive',
-     'files': ['v1-5-pruned-emaonly-fp16.safetensors', 'v1-5-pruned-emaonly.safetensors'], 'components': []},
-    {'name': 'SDXL Turbo', 'family': 'sdxl_turbo', 'repo': 'stabilityai/sdxl-turbo',
-     'files': ['sd_xl_turbo_1.0_fp16.safetensors'], 'components': []},
-    {'name': 'FLUX.1 schnell', 'family': 'flux', 'repo': 'city96/FLUX.1-schnell-gguf',
-     'files': ['flux1-schnell-Q4_K_S.gguf', 'flux1-schnell-Q5_K_S.gguf', 'flux1-schnell-Q8_0.gguf'],
-     'components': [
-         {'role': 'clip_l', 'sources': [('comfyanonymous/flux_text_encoders', 'clip_l.safetensors')]},
-         {'role': 't5xxl', 'sources': [('comfyanonymous/flux_text_encoders', 't5xxl_fp8_e4m3fn.safetensors')]},
-         {'role': 'vae', 'sources': [('Comfy-Org/Lumina_Image_2.0_Repackaged', 'split_files/vae/ae.safetensors'),
-                                     ('black-forest-labs/FLUX.1-schnell', 'ae.safetensors')]}]},
-]
-IMAGE_EXTENSIONS = ('.safetensors', '.gguf')
-IMAGE_MAX_BYTES = 128 * 1024 ** 3
-
-
-def image_artifact(entry, model_repo, revision, item, components):
-    """One catalogue row for a diffusion model file, with the components it needs."""
-    name = item['name']
-    if '..' in name.split('/') or '\\' in name or len(name) > 512 or not name.lower().endswith(IMAGE_EXTENSIONS):
-        return None
-    if not isinstance(item['size'], int) or not 0 < item['size'] <= IMAGE_MAX_BYTES:
-        return None
-    quantisation = re.search(r'(?:IQ|Q|BF|F)[0-9][A-Za-z0-9_]*', name.rsplit('/', 1)[-1], re.I)
-    return {'model_id': model_repo, 'display_name': f"{entry['name']} / {name.rsplit('/', 1)[-1]}", 'filename': name,
-            'url': item['url'], 'size': item['size'], 'sha256': item.get('sha256'), 'revision': revision,
-            'format': 'GGUF' if name.lower().endswith('.gguf') else 'SAFETENSORS', 'kind': 'image',
-            'family': entry['family'], 'architecture': entry['family'], 'author': model_repo.split('/')[0],
-            'quantization': quantisation.group(0) if quantisation else 'FP16', 'parameter_count': None,
-            'license': entry.get('license', 'unknown'), 'components': components, 'release_date': entry.get('release_date')}
-
 
 async def hugging_face_files(repo, model_repo):
     """File sizes, checksums and the pinned revision of one Hugging Face repository."""
@@ -653,60 +414,17 @@ async def hugging_face_files(repo, model_repo):
     return revision, files, (data.get('cardData') or {}).get('license', 'unknown'), data.get('createdAt') or data.get('lastModified')
 
 
-async def diffusion(repo, emit=None):
-    """Image models. Metadata only: nothing is downloaded until someone installs one."""
-    config = json.loads(repo['config'])
-    entries = config.get('families') or IMAGE_FAMILIES
-    listings, result = {}, []
+# One module per provider; they reach the helpers above through this package,
+# so every provider uses the same validated requests.
+from .hugging_face import EXCLUDED_NAMES, huggingface, huggingface_model, latest_from_publishers, model_name, tolerant_model  # noqa: E402,F401
+from .model_scope import MODELSCOPE_PUBLISHERS, MODELSCOPE_SEARCH, modelscope, modelscope_latest, modelscope_model  # noqa: E402,F401
+from .github_releases import github  # noqa: E402,F401
+from .manifest import generic, verify_manifest  # noqa: E402,F401
+from .diffusion_models import IMAGE_EXTENSIONS, IMAGE_FAMILIES, IMAGE_MAX_BYTES, diffusion, image_artifact  # noqa: E402,F401
+from .whisper_models import SPEECH_EXCLUDED, SPEECH_MAX_BYTES, SPEECH_REPO, speech, speech_artifact, speech_name  # noqa: E402,F401
+from .voice_models import VOICE_EXCLUDED, VOICE_MODELS, voice, voice_artifacts  # noqa: E402,F401
 
-    async def listing(model_repo):
-        if model_repo not in listings:
-            listings[model_repo] = await hugging_face_files(repo, model_repo)
-        return listings[model_repo]
-
-    for entry in entries[:40]:
-        try:
-            revision, files, license_name, released = await listing(entry['repo'])
-        except RepositoryError as exc:
-            logging.warning('image repository %s: skipping %s: %s', repo.get('name'), entry['repo'], exc)
-            continue
-        components = []
-        missing = None
-        for component in entry.get('components', []):
-            resolved = None
-            for source_repo, source_file in component['sources']:
-                try:
-                    _, source_files, _, _ = await listing(source_repo)
-                except RepositoryError:
-                    continue
-                found = source_files.get(source_file)
-                if found and found['size']:
-                    resolved = {'role': component['role'], 'filename': source_file, 'url': found['url'],
-                                'size': found['size'], 'sha256': found.get('sha256'), 'repository': source_repo}
-                    break
-            if not resolved:
-                missing = component['role']
-                break
-            components.append(resolved)
-        if missing:
-            # Without every component the model cannot run, so it is not offered.
-            logging.warning('image repository %s: %s needs a %s nobody published openly', repo.get('name'), entry['name'], missing)
-            continue
-        found_rows = []
-        for filename in entry['files']:
-            item = files.get(filename)
-            if not item:
-                continue
-            row = image_artifact({**entry, 'license': license_name, 'release_date': released}, entry['repo'], revision, item, components)
-            if row:
-                found_rows.append(row)
-        if emit and found_rows:
-            found_rows = await emit(found_rows)
-        result.extend(found_rows)
-    return result
-
-
-PROVIDERS = {'huggingface': huggingface, 'modelscope': modelscope, 'github': github, 'http': generic, 'internal': generic, 'diffusion': diffusion}
+PROVIDERS = {'huggingface': huggingface, 'modelscope': modelscope, 'github': github, 'http': generic, 'internal': generic, 'diffusion': diffusion, 'speech': speech, 'voice': voice}
 
 def matches(model, filters):
     for key in ('author', 'architecture', 'quantization', 'license', 'repository_id'):
@@ -726,11 +444,14 @@ def matches(model, filters):
 def prune(repo_id, seen):
     """Forget what the repository no longer offers, so a superseded release or a
     list the repository was reconfigured away from stops filling the catalog.
-    Anything installed or ever downloaded keeps its row: those reference it."""
+    Anything installed or being downloaded keeps its row: those reference it."""
+    # A download that failed or was cancelled does not keep a file the
+    # repository stopped offering, or no longer offers as runnable: it goes too.
     for row in rows('SELECT d.id,d.upstream_key,d.revision FROM discovered_models d WHERE d.repository_id=? '
                     'AND NOT EXISTS (SELECT 1 FROM installed_models i WHERE i.id=d.id) '
-                    'AND NOT EXISTS (SELECT 1 FROM downloads w WHERE w.model_id=d.id)', (repo_id,)):
+                    "AND NOT EXISTS (SELECT 1 FROM downloads w WHERE w.model_id=d.id AND w.state NOT IN ('FAILED','CANCELLED'))", (repo_id,)):
         if (row['upstream_key'], row['revision']) not in seen:
+            execute('DELETE FROM downloads WHERE model_id=?', (row['id'],))
             execute('DELETE FROM model_artifacts WHERE id=?', (row['id'],))
             execute('DELETE FROM discovered_models WHERE id=?', (row['id'],))
 
@@ -748,9 +469,9 @@ async def sync(repo_id, test=False):
         if not test:
             # Only language models carry a GGUF header worth reading; a diffusion
             # model is described by the catalogue entry that offers it.
-            language = [item for item in batch if item.get('kind') != 'image']
+            language = [item for item in batch if item.get('kind') not in ('image', 'speech', 'voice')]
             await attach_dimensions(language, repo)
-            batch = language + [item for item in batch if item.get('kind') == 'image']
+            batch = language + [item for item in batch if item.get('kind') in ('image', 'speech', 'voice')]
         for item in batch:
             validate_url(item['url'], config.get('allow_private', False))
             if item.get('projector'):
@@ -774,14 +495,20 @@ async def sync(repo_id, test=False):
             await huggingface(repo, emit=store)
         elif repo['provider'] == 'diffusion':
             await diffusion(repo, emit=store)
+        elif repo['provider'] == 'speech':
+            await speech(repo, emit=store)
+        elif repo['provider'] == 'voice':
+            await voice(repo, emit=store)
         elif repo['provider'] == 'modelscope':
             await modelscope(repo, emit=store)
         else:
             await store(await PROVIDERS[repo['provider']](repo))
         if not test:
             prune(repo_id, seen)
+            revisions.check_all()
         count = counted[0]
         execute('UPDATE repositories SET status=?,last_sync=?,duration=?,found=?,error=NULL WHERE id=?', ('ONLINE', now(), time.monotonic() - start, count, repo_id))
+        alerts.resolve('repository:' + repo_id)
         audit('repository-worker', 'repository_test' if test else 'repository_sync', repo_id, {'found': count})
         return {'found': count, 'status': 'ONLINE'}
     except (ValueError, KeyError, httpx.HTTPError, OSError) as exc:
@@ -791,6 +518,11 @@ async def sync(repo_id, test=False):
         status = message if message in ('AUTH REQUIRED', 'RATE LIMITED') else ('NOT CONFIGURED' if message.startswith('Configure') else 'ERROR')
         # What was saved before the failure stays listed; nothing is pruned.
         execute('UPDATE repositories SET status=?,last_sync=?,duration=?,error=? WHERE id=?', (status, now(), time.monotonic() - start, message, repo_id))
+        if status == 'NOT CONFIGURED' or test:
+            alerts.resolve('repository:' + repo_id)
+        else:
+            alerts.raise_alert('repository:' + repo_id, 'WARNING', f"{repo['name']}: synchronisation failed ({message}). "
+                               'Check the connection, DNS and proxy under System, then synchronise again.')
         return {'status': status, 'error': message}
 
 async def sync_all():

@@ -8,7 +8,9 @@ ROOT="$PWD/build/rootfs"
 APT=(-o Acquire::ForceIPv4=true -o Acquire::Retries=5 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
 source build/versions.env
 STAMP="$LLAMA_COMMIT cpu-all vulkan"
-if [[ -f "$ROOT/opt/aios/runtime/COMMIT" && $(cat "$ROOT/opt/aios/runtime/COMMIT") == "$STAMP" && -f "$ROOT/opt/aios/runtime/lib/libggml-vulkan.so" ]]; then
+# What the installed runtime holds: the language server and the voice tool.
+DONE="$STAMP tts"
+if [[ -f "$ROOT/opt/aios/runtime/COMMIT" && $(cat "$ROOT/opt/aios/runtime/COMMIT") == "$DONE" && -f "$ROOT/opt/aios/runtime/lib/libggml-vulkan.so" ]]; then
   exit 0
 fi
 # glslc compiles the compute shaders, SPIR-V headers and the loader development
@@ -29,11 +31,11 @@ if [[ $(cat "$ROOT/usr/src/llama-build/AIOS_STAMP" 2>/dev/null) != "$STAMP" ]]; 
 fi
 # Some generated shader sources need several GiB each to compile; when two at once
 # exhaust the memory, finish the rest one at a time.
-chroot "$ROOT" cmake --build /usr/src/llama-build --target llama-server ggml-vulkan -j2 ||
-  chroot "$ROOT" cmake --build /usr/src/llama-build --target llama-server ggml-vulkan -j1
+chroot "$ROOT" cmake --build /usr/src/llama-build --target llama-server llama-tts ggml-vulkan -j2 ||
+  chroot "$ROOT" cmake --build /usr/src/llama-build --target llama-server llama-tts ggml-vulkan -j1
 rm -rf "$ROOT/opt/aios/runtime"
 mkdir -p "$ROOT/opt/aios/runtime/bin" "$ROOT/opt/aios/runtime/lib"
-cp "$ROOT/usr/src/llama-build/bin/llama-server" "$ROOT/opt/aios/runtime/bin/"
+cp "$ROOT/usr/src/llama-build/bin/llama-server" "$ROOT/usr/src/llama-build/bin/llama-tts" "$ROOT/opt/aios/runtime/bin/"
 cp -a "$ROOT"/usr/src/llama-build/bin/*.so* "$ROOT/opt/aios/runtime/lib/"
 [[ -f "$ROOT/opt/aios/runtime/lib/libggml-vulkan.so" ]] || { echo 'Vulkan backend missing from the build'; exit 1; }
-echo "$STAMP" > "$ROOT/opt/aios/runtime/COMMIT"
+echo "$DONE" > "$ROOT/opt/aios/runtime/COMMIT"

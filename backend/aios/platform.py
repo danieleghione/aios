@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import tarfile
+import urllib.error
+import urllib.request
 import tempfile
 import time
 from pathlib import Path
@@ -18,7 +20,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import BaseModel, Field, model_validator
-from .core import DATA, ETC, atomic_write, audit, connection, encode, execute, now, rows, set_setting, uid
+from . import backups, system_files
+from .core import DATA, ETC, atomic_write, audit, connection, encode, execute, now, rows, set_setting, setting, uid
 
 class NetworkConfig(BaseModel):
     interface: str = Field(pattern=r'^[a-zA-Z0-9_.:-]{1,32}$')
@@ -36,7 +39,7 @@ class NetworkConfig(BaseModel):
         return self
 
 class SystemConfig(BaseModel):
-    hostname: str = Field(pattern=r'^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$')
+    hostname: str = Field(pattern=r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$')
     timezone: str = Field(default='UTC', pattern=r'^[a-zA-Z0-9_+/-]{1,64}$')
     ntp: list[str] = Field(default_factory=lambda: ['ntp.ubuntu.com'], max_length=8)
     proxy: str = Field(default='', max_length=512)
@@ -57,6 +60,7 @@ class SystemConfig(BaseModel):
 
 class BackupRequest(BaseModel):
     include_models: bool = False
+    scheduled: bool = False
 
 class TLSRequest(BaseModel):
     certificate: str = Field(max_length=65536)
@@ -69,7 +73,21 @@ def run(args, timeout=120):
 def enqueue(action, payload):
     key = uid()
     execute('INSERT INTO system_jobs VALUES (?,?,?,?,?,?)', (key, action, encode(payload), 'QUEUED', None, now()))
-    return {'id': key, 'state': 'QUEUED'}
+    return {'id': key, 'state': 'QUEUED', 'action': action}
+
+def chat_voice():
+    """Point the chat's read-aloud button at the published voice model, or back
+    at the browser's voice; the chat reads the setting on its next request."""
+    from . import webui_config
+    database = DATA / 'webui' / 'webui.db'
+    key = (ETC / 'secrets' / 'inference-key').read_text().strip()
+    changed = webui_config.reconcile(database, key, bool(setting('default_voice_model', '')))
+    # SQLite may have created its journal files as root: they belong to the chat.
+    for path in (database, database.with_name('webui.db-wal'), database.with_name('webui.db-shm')):
+        if path.exists():
+            run(['chown', 'aios-webui:aios-webui', str(path)])
+    return {'changed': changed}
+
 
 def safe_archive(archive, target, max_size=100 * 1024 ** 3):
     total = 0
@@ -83,7 +101,25 @@ def safe_archive(archive, target, max_size=100 * 1024 ** 3):
                 raise ValueError('Archive exceeds allowed size')
             tar.extract(member, target, filter='data')
 
-def backup(include_models):
+
+def readable_tree(root):
+    """Make an extracted release readable by the services that run it. The broker
+    runs as root with a private umask, so the staged directory came out owned by
+    root and mode 0700: every unit then failed with "changing to the requested
+    working directory failed", and the release was rolled back for the wrong
+    reason. Ownership from the archive is dropped too: those ids mean nothing here."""
+    for path in [root, *root.rglob('*')]:
+        try:
+            os.chown(path, 0, 0)
+            if path.is_dir():
+                path.chmod(0o755)
+            elif path.is_file():
+                mode = path.stat().st_mode & 0o777
+                path.chmod(0o755 if mode & 0o100 else 0o644)
+        except OSError:
+            continue
+
+def backup(include_models, scheduled=False):
     key = uid()
     target = DATA / 'backups' / (key + '.tar.gz')
     with tempfile.TemporaryDirectory(dir=DATA / 'backups') as temporary:
@@ -106,16 +142,33 @@ def backup(include_models):
         finally:
             run(['systemctl', 'start', 'aios-open-webui.service'])
     os.replace(target.with_suffix('.part'), target)
-    os.chmod(target, 0o600)
-    os.chown(target, shutil._get_uid('aios'), shutil._get_gid('aios'))
-    return {'file': target.name, 'sha256': hashlib.file_digest(target.open('rb'), 'sha256').hexdigest()}
+    passphrase = backups.stored_passphrase()
+    if passphrase:
+        # Accounts, credentials and chats never rest unencrypted once a
+        # passphrase is set: the plain archive is sealed, then removed.
+        sealed = target.with_name(key + backups.SEALED)
+        backups.encrypt_file(target, sealed, passphrase)
+        target.unlink()
+        target = sealed
+    backups.fix_permissions(target)
+    backups.fix_permissions(backups.record(target, scheduled=scheduled, include_models=include_models, encrypted=bool(passphrase)))
+    removed = backups.prune(int((setting('backup_schedule') or {}).get('keep', 7))) if scheduled else []
+    return {'file': target.name, 'encrypted': bool(passphrase), 'scheduled': scheduled, 'removed': removed,
+            'sha256': hashlib.file_digest(target.open('rb'), 'sha256').hexdigest()}
 
-def restore(filename):
-    if not re.fullmatch(r'[a-f0-9-]{36}\.tar\.gz', filename):
+def restore(filename, passphrase=''):
+    if not re.fullmatch(backups.NAME, filename):
         raise ValueError('Invalid backup filename')
     with tempfile.TemporaryDirectory(dir=DATA / 'backups') as temporary:
         stage = Path(temporary)
-        safe_archive(DATA / 'backups' / filename, stage)
+        archive = DATA / 'backups' / filename
+        if backups.is_encrypted(archive):
+            # The passphrase given with the request, for an archive from another
+            # appliance, or the one this appliance seals its own backups with.
+            opened = stage / 'archive.tar.gz'
+            backups.decrypt_file(archive, opened, passphrase or backups.stored_passphrase())
+            archive = opened
+        safe_archive(archive, stage)
         import sqlite3
         with sqlite3.connect(stage / 'database/aios.db') as db:
             if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -144,6 +197,14 @@ def restore(filename):
             run(['chown', '-R', 'aios:aios', str(DATA / 'database'), str(ETC)])
             run(['chown', '-R', 'aios-webui:aios-webui', str(DATA / 'webui')])
             run(['chown', '-R', 'aios:aios', str(DATA / 'models')])
+            # The restored chat keeps the settings it had; point it back at this
+            # appliance before it starts, as a boot would.
+            from .webui_config import reconcile
+            try:
+                reconcile(DATA / 'webui' / 'webui.db', (ETC / 'secrets' / 'inference-key').read_text().strip())
+                run(['chown', '-R', 'aios-webui:aios-webui', str(DATA / 'webui')])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
             audit('platform', 'restore_complete', filename)
         finally:
             run(['systemctl', 'start', 'aios-control-plane', 'aios-download-worker', 'aios-runtime-manager', 'aios-open-webui'])
@@ -205,15 +266,80 @@ def tls_apply(payload):
         raise ValueError('TLS configuration rejected; previous certificate restored')
     return {'updated': True}
 
+# The appliance ships with no trust anchor: whoever runs it installs the public
+# key of whoever they accept releases from, from the portal or the console.
+def release_key_path():
+    return DATA / 'system' / 'release.pub'
+
+
+# What a signed release may replace, where it lives, what proves it is whole and
+# which services run it. The three inference engines are children of the runtime
+# manager, so restarting it is what puts a new engine to work.
+RELEASE_COMPONENTS = {
+    'application': {'directory': 'app', 'entrypoint': 'backend/aios/app.py',
+                    'services': ['aios-control-plane', 'aios-download-worker', 'aios-runtime-manager']},
+    'runtime': {'directory': 'runtime', 'entrypoint': 'bin/llama-server', 'services': ['aios-runtime-manager']},
+    'imaging': {'directory': 'imaging', 'entrypoint': 'bin/sd-server', 'services': ['aios-runtime-manager']},
+    'voice': {'directory': 'voice', 'entrypoint': 'bin/whisper-server', 'services': ['aios-runtime-manager']},
+    'open-webui': {'directory': 'webui', 'entrypoint': 'bin/open-webui', 'services': ['aios-open-webui']},
+    # Optional: llama.cpp's CUDA backend and the CUDA libraries, for NVIDIA cards.
+    'cuda': {'directory': 'cuda', 'entrypoint': 'lib/libggml-cuda.so', 'services': ['aios-runtime-manager']},
+}
+
+
+def load_release_key():
+    """The Ed25519 public key releases are verified against, or a clear refusal."""
+    for path in (release_key_path(), Path('/etc/aios-release.pub')):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        pub = serialization.load_pem_public_key(data)
+        if not isinstance(pub, Ed25519PublicKey):
+            raise ValueError('Release key must be Ed25519')
+        return pub
+    raise ValueError('No release key installed: add the public key of whoever signs your updates under System, Updates')
+
+
+# A unit can be "active" with a process that answers nothing: an update that
+# breaks the application must be caught here, not by the first user.
+HEALTH = {'application': 'http://127.0.0.1:8081/health', 'open-webui': 'http://127.0.0.1:8080/health'}
+
+
+def answers(component, attempts=20):
+    """Wait for the updated component to serve requests again."""
+    url = HEALTH.get(component)
+    if not url:
+        return
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(3 if attempt else 1)
+    raise ValueError('The updated component did not answer on ' + url)
+
+
+def restart(units):
+    """Start units after a failed release: systemd counts the crashes of the
+    release being replaced, and "start request repeated too quickly" would leave
+    the appliance with nothing running."""
+    try:
+        run(['systemctl', 'reset-failed', *units])
+    except subprocess.SubprocessError:
+        pass
+    run(['systemctl', 'start', *units])
+
+
 def update_release(payload):
     manifest = payload['manifest']
     signature = base64.b64decode(payload['signature'], validate=True)
-    pub = serialization.load_pem_public_key(Path('/etc/aios-release.pub').read_bytes())
-    if not isinstance(pub, Ed25519PublicKey):
-        raise ValueError('Release key must be Ed25519')
+    pub = load_release_key()
     pub.verify(signature, encode(manifest).encode())
     component = manifest['component']
-    if component not in ('application', 'runtime', 'open-webui'):
+    if component not in RELEASE_COMPONENTS:
         raise ValueError('Platform updates require verified reinstallation and backup restore')
     filename = payload['file']
     if not re.fullmatch(r'[a-f0-9-]{36}\.tar\.gz', filename):
@@ -222,33 +348,68 @@ def update_release(payload):
     with archive.open('rb') as stream:
         if hashlib.file_digest(stream, 'sha256').hexdigest() != manifest['sha256']:
             raise ValueError('Release checksum mismatch')
-    target = Path('/opt/aios') / {'application': 'app', 'runtime': 'runtime', 'open-webui': 'webui'}[component]
-    service = {'application': ['aios-control-plane', 'aios-download-worker', 'aios-runtime-manager'], 'runtime': ['aios-runtime-manager'], 'open-webui': ['aios-open-webui']}[component]
+    target = Path('/opt/aios') / RELEASE_COMPONENTS[component]['directory']
+    service = RELEASE_COMPONENTS[component]['services']
     with tempfile.TemporaryDirectory(dir=target.parent) as temporary:
         stage = Path(temporary) / 'content'
         stage.mkdir()
         safe_archive(archive, stage, 10 * 1024 ** 3)
-        marker = {'application': 'backend/aios/app.py', 'runtime': 'bin/llama-server', 'open-webui': 'bin/open-webui'}[component]
+        readable_tree(stage)
+        marker = RELEASE_COMPONENTS[component]['entrypoint']
         if not (stage / marker).is_file():
             raise ValueError('Release missing component entrypoint')
         recovery = target.with_name(target.name + '.previous')
         if recovery.exists():
             shutil.rmtree(recovery)
         run(['systemctl', 'stop', *service])
-        target.rename(recovery)
+        # An optional component may be installed for the first time.
+        first = not target.exists()
+        if not first:
+            target.rename(recovery)
         stage.rename(target)
         try:
-            run(['systemctl', 'start', *service])
+            if component == 'application':
+                # Units, the NGINX site and the firewall rules come with the code.
+                system_files.sync(target)
+            restart(service)
             time.sleep(10)
             for unit in service:
                 run(['systemctl', 'is-active', unit])
-        except subprocess.SubprocessError:
+            answers(component)
+        except (subprocess.SubprocessError, ValueError) as exc:
             run(['systemctl', 'stop', *service])
             shutil.rmtree(target)
-            recovery.rename(target)
-            run(['systemctl', 'start', *service])
-            raise ValueError('Release health check failed; previous component restored')
-    return {'component': component, 'version': manifest['version'], 'rollback': str(recovery)}
+            if not first:
+                recovery.rename(target)
+            if component == 'application':
+                try:
+                    system_files.sync(target)
+                except (ValueError, subprocess.SubprocessError, OSError):
+                    pass
+            # Without this the rollback inherits the failed release's restart
+            # counter and systemd refuses to start anything at all.
+            restart(service)
+            raise ValueError(f'Release health check failed ({exc}); previous component restored') from None
+    (target / 'VERSION').write_text(str(manifest['version']) + '\n')
+    os.chmod(target / 'VERSION', 0o644)
+    return {'component': component, 'version': manifest['version'], 'rollback': None if first else str(recovery)}
+
+
+def remove_component(component):
+    """Take out an optional component; it is kept as .previous, like an update."""
+    if component != 'cuda':
+        raise ValueError('Only the CUDA package can be removed')
+    target = Path('/opt/aios') / RELEASE_COMPONENTS[component]['directory']
+    if not target.exists():
+        raise ValueError('The CUDA package is not installed')
+    service = RELEASE_COMPONENTS[component]['services']
+    recovery = target.with_name(target.name + '.previous')
+    if recovery.exists():
+        shutil.rmtree(recovery)
+    run(['systemctl', 'stop', *service])
+    target.rename(recovery)
+    restart(service)
+    return {'component': component, 'removed': True, 'kept': str(recovery)}
 
 async def broker():
     while True:
@@ -263,6 +424,11 @@ async def broker():
                     rollback.unlink()
                 except subprocess.SubprocessError:
                     pass
+        schedule = setting('backup_schedule') or {}
+        if backups.due(schedule, setting('backup_last_scheduled', ''), now()):
+            set_setting('backup_last_scheduled', time.strftime('%Y-%m-%d', time.localtime(now())))
+            enqueue('backup', {'include_models': bool(schedule.get('include_models')), 'scheduled': True})
+            audit('platform', 'backup_scheduled')
         for job in rows("SELECT * FROM system_jobs WHERE state='QUEUED' ORDER BY created_at"):
             execute("UPDATE system_jobs SET state='RUNNING' WHERE id=?", (job['id'],))
             try:
@@ -281,11 +447,22 @@ async def broker():
                 elif action == 'tls':
                     result = tls_apply(payload)
                 elif action == 'backup':
-                    result = backup(BackupRequest.model_validate(payload).include_models)
+                    request = BackupRequest.model_validate(payload)
+                    result = backup(request.include_models, request.scheduled)
+                elif action == 'component-remove':
+                    result = remove_component(payload['component'])
+                elif action == 'chat-voice':
+                    result = chat_voice()
                 elif action == 'restore':
-                    result = restore(payload['file'])
+                    result = restore(payload['file'], payload.get('passphrase', ''))
                 elif action == 'update':
                     result = update_release(payload)
+                elif action == 'os-update':
+                    # The same script the console runs: check lists what Ubuntu
+                    # offers, apply installs it and records whether to reboot.
+                    mode = 'apply' if payload.get('mode') == 'apply' else 'check'
+                    done = subprocess.run(['/opt/aios/app/installer/updates.sh', mode], capture_output=True, text=True, timeout=3600)
+                    result = {'mode': mode, 'exit_code': done.returncode, 'output': (done.stdout + done.stderr)[-2000:]}
                 elif action in ('reboot', 'shutdown'):
                     run(['shutdown', '-r' if action == 'reboot' else '-h', '+1'])
                     result = {'scheduled_in_seconds': 60}

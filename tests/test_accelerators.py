@@ -210,7 +210,8 @@ def test_the_image_builds_and_ships_gpu_support():
     for package in ('mesa-vulkan-drivers', 'vulkan-tools', 'libnvidia-gl-$NVIDIA_BRANCH', 'nvidia-utils-$NVIDIA_BRANCH'):
         assert package in image, package
     assert 'drivers/nvidia/open' in image and 'drivers/nvidia/closed' in image
-    assert 'systemctl enable aios-nvidia-driver' in image and 'apt-mark manual binutils' in image
+    enabled = (ROOT / 'config/enabled-units').read_text().split()
+    assert 'aios-nvidia-driver.service' in enabled and 'config/enabled-units' in image and 'apt-mark manual binutils' in image
     # A backend that is not next to the executable is silently never loaded.
     assert 'lib/libggml-vulkan.so; do' in image and "grep -q 'Vulkan0:'" in image
 
@@ -349,4 +350,20 @@ def test_the_control_plane_never_probes_gpus(environment, monkeypatch):
     monkeypatch.setattr(accelerators, 'detect', lambda: pytest.fail('the control plane probed the GPUs'))
     monkeypatch.setattr(hardware, 'command', lambda *args, **kwargs: '')
     assert hardware.profile(probe=False)['accelerators'] == []
-    assert 'profile(probe=False)' in (ROOT / 'backend/aios/app.py').read_text()
+    assert 'profile(probe=False)' in (ROOT / 'backend/aios/routes_system.py').read_text()
+
+
+def test_an_integrated_gpu_counts_the_weights_whole():
+    # 32 GiB laptop with an Iris Xe and a 27B model at Q8: loads through the
+    # shared-memory GPU only with every weight resident, which does not fit.
+    hw = {**hardware([d for d in devices() if d['type'] == 'integrated']), 'ram': {'total': 32 * GIB, 'available': 30 * GIB}}
+    rated = compatibility({'size': int(28.6 * GIB), 'format': 'GGUF'}, hw=hw)
+    assert rated['classification'] == 'NOT_RECOMMENDED'
+    assert any('counted whole' in reason for reason in rated['reasons'])
+    cpu_only = compatibility({'size': int(28.6 * GIB), 'format': 'GGUF'}, hw={**hw, 'accelerators': []})
+    assert cpu_only['classification'] == 'LIMITED' and any('will be slow' in reason for reason in cpu_only['reasons'])
+
+
+def test_a_model_that_fits_whole_is_not_downgraded():
+    rated = compatibility({'size': 2 * GIB, 'format': 'GGUF'}, hw=hardware([]))
+    assert rated['classification'] in ('OPTIMAL', 'COMPATIBLE')

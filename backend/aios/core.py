@@ -133,6 +133,36 @@ _RETIRED_CURATED = {
 }
 
 
+ADDED_COLUMNS = {
+    'runtime_instances': {'last_used': 'REAL', 'busy': 'INTEGER NOT NULL DEFAULT 0'},
+    'users': {'last_login': 'REAL'},
+    'downloads': {'replaces': 'TEXT'},
+    # Alerts that existed before notifications count as already sent.
+    'alerts': {'notified': 'INTEGER NOT NULL DEFAULT 1'},
+    'installed_models': {'replaced_by': 'TEXT'},
+    'sessions': {'created': 'REAL', 'client': 'TEXT'},
+    'api_keys': {'requests': 'INTEGER NOT NULL DEFAULT 0', 'tokens': 'INTEGER NOT NULL DEFAULT 0',
+                 'rate_limit': 'INTEGER NOT NULL DEFAULT 0', 'models': 'TEXT'},
+}
+
+
+def builtin_repositories():
+    """The repositories every appliance offers, all disabled until someone turns
+    one on. ModelScope follows the same publishers as the Hugging Face families,
+    so enabling it discovers models instead of asking for a list first."""
+    return [
+        ("Hugging Face", "huggingface", "https://huggingface.co", {}),
+        ("ModelScope", "modelscope", "https://modelscope.cn",
+         {"publishers": ["Qwen", "unsloth", "lmstudio-community", "ggml-org"], "search": ["GGUF"], "limit": 20}),
+        ("GitHub", "github", "https://api.github.com", {}),
+        ("Internal", "internal", "", {}),
+        *[(name, "huggingface", "https://huggingface.co", query) for name, query in CURATED.items()],
+        ("Image models (diffusion)", "diffusion", "https://huggingface.co", {}),
+        ("Speech models (whisper)", "speech", "https://huggingface.co", {}),
+        ("Voice models (text to speech)", "voice", "https://huggingface.co", {}),
+    ]
+
+
 def initialize():
     for sub in ("models", "downloads", "cache", "registry", "database", "system", "backups", "runtime", "webui"):
         (DATA / sub).mkdir(parents=True, exist_ok=True)
@@ -143,21 +173,24 @@ def initialize():
     with connection() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript(Path(__file__).with_name("schema.sql").read_text())
+        # Columns added after a table was first created, for databases made by an
+        # earlier release or restored from its backup. Adding them in place keeps
+        # every backup restorable across releases.
+        for table, columns in ADDED_COLUMNS.items():
+            present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns.items():
+                if name not in present:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
     os.chmod(DB, 0o600)
-    if not one("SELECT id FROM repositories LIMIT 1"):
-        # ModelScope ships with the same publishers the Hugging Face families follow,
-        # so enabling it discovers models instead of asking for a list first.
-        seeded = {"ModelScope": {"publishers": ["Qwen", "unsloth", "lmstudio-community", "ggml-org"], "search": ["GGUF"], "limit": 20}}
-        for name, provider, url in [("Hugging Face", "huggingface", "https://huggingface.co"), ("ModelScope", "modelscope", "https://modelscope.cn"), ("GitHub", "github", "https://api.github.com"), ("Internal", "internal", "")]:
-            execute("INSERT INTO repositories(id,name,provider,url,config) VALUES (?,?,?,?,?)", (uid(), name, provider, url, encode(seeded.get(name, {}))))
-        # Seeded disabled: each family is synchronised only once someone turns it on.
-        # Shipping them enabled made switching on one look like it switched on all.
-        for name, query in CURATED.items():
+    # Every repository the appliance ships, added when it is missing: a database
+    # created by an earlier release, restored from its backup or carried across a
+    # signed application update gains the repositories added since, disabled like
+    # all the others. Nothing already there is changed.
+    present = {row["name"] for row in rows("SELECT name FROM repositories")}
+    for name, provider, url, config in builtin_repositories():
+        if name not in present:
             execute("INSERT INTO repositories(id,name,provider,url,config,enabled) VALUES (?,?,?,?,?,0)",
-                    (uid(), name, "huggingface", "https://huggingface.co", encode(query)))
-        # Image generation, seeded disabled like the others.
-        execute("INSERT INTO repositories(id,name,provider,url,config,enabled) VALUES (?,?,?,?,?,0)",
-                (uid(), "Image models (diffusion)", "diffusion", "https://huggingface.co", '{}'))
+                    (uid(), name, provider, url, encode(config)))
     for name, models in _RETIRED_CURATED.items():
         # Databases created by earlier builds, or restored from their backups, still
         # carry the fixed lists; move them to discovery unless someone edited them.

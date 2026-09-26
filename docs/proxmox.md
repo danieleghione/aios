@@ -1,10 +1,10 @@
 # Installing AIOS on Proxmox VE from a virtual CD/DVD
 
-Use **`aios-installer-x86_64.iso`** in the Proxmox ISO storage. The raw `aios-x86_64.img` is a disk image: attaching it as a CD/DVD does not work. It stays available for USB sticks or as an imported VM disk.
+Use **`aios-installer-1.9.0-x86_64.iso`** in the Proxmox ISO storage. The raw `aios-x86_64.img` is a disk image: attaching it as a CD/DVD does not work. It stays available for USB sticks or as an imported VM disk.
 
 > **The ISO works with stock Proxmox settings.** Its optical boot catalogue holds two El Torito entries, BIOS and UEFI, so the medium starts under both SeaBIOS and OVMF. The installer writes both bootloaders to the target disk whatever firmware it was started with, so the installed system boots either way. The default profile — SeaBIOS, i440fx, 1 core, 2 GiB — is covered by the automated tests, with a full installation and reboot.
 
-1. On the Proxmox node pick a storage that accepts **ISO Images** (for example `local`), then **Upload** and upload `aios-installer-x86_64.iso`.
+1. On the Proxmox node pick a storage that accepts **ISO Images** (for example `local`), then **Upload** and upload `aios-installer-1.9.0-x86_64.iso`.
 2. Create a Linux VM and select the ISO as the CD/DVD.
 3. The defaults on the System tab are fine. To use UEFI instead of the default BIOS, choose **q35** and **OVMF (UEFI)**, then add an EFI Disk with **Pre-Enroll keys disabled**: this appliance does not sign its own bootloader and Secure Boot would refuse it. On an existing EFI Disk, check that Secure Boot is disabled in the OVMF firmware menu.
 4. Use the **VirtIO SCSI single** controller (the default) and an empty SCSI disk of at least **16 GiB**; the default 32 GiB is fine. Installation and first boot work with the default minimum of 1 core and 2 GiB, but real use needs more: the CPU runs the inference and the model has to fit in memory. Set CPU type **host** so the guest sees the real vector instructions. To use a GPU, pass it through to the VM: see [GPU passthrough](#gpu-passthrough).

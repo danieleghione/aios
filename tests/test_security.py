@@ -78,8 +78,8 @@ def test_audit_immutable(environment):
     assert json.loads(events[0]['payload'])['action']=='test'
 
 def test_secret_redaction(admin,environment,monkeypatch):
-    import aios.app
-    monkeypatch.setattr(aios.app,'validate_url',lambda *args:None)
+    from aios import routes_models
+    monkeypatch.setattr(routes_models,'validate_url',lambda *args:None)
     secret='sensitive-unit-test-token-987'
     response=admin.post('/api/v1/aios/repositories',json={'name':'Private','provider':'http','url':'https://example.com/manifest.json','token':secret})
     assert response.status_code==200
@@ -124,8 +124,13 @@ def test_dns_connection_is_pinned(monkeypatch):
     assert headers['Host'] == 'models.example'
     assert extensions['sni_hostname'] == 'models.example'
 
-def test_offline_api_reference(client):
-    response = client.get('/api/aios/docs')
+def test_offline_api_reference(client, admin):
+    anonymous = client.__class__(client.app, base_url='https://testserver')
+    # The reference describes every route: only for someone signed in.
+    assert anonymous.get('/api/aios/docs').status_code == 401
+    assert anonymous.get('/api/aios/openapi.json').status_code == 401
+    assert admin.get('/api/aios/openapi.json').json()['paths']
+    response = admin.get('/api/aios/docs')
     assert response.status_code == 200
     assert '/api/v1/aios/models' in response.text
     assert '<script src="https://' not in response.text

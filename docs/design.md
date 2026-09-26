@@ -12,9 +12,9 @@ The choices behind AIOS, and the reasons for them. [Architecture](architecture.m
 
 ## Non-goals
 
-- Multi-node clustering, per-model GPU scheduling or serving many concurrent models. One language model and one image model are loaded at a time.
+- Multi-node clustering, per-model GPU scheduling or serving many concurrent models. One model of each kind — language, image, speech, voice — is loaded at a time.
 - Being a general-purpose Linux box. There is no desktop, no user shell and no package management beyond system updates.
-- Direct exposure to the Internet. The trust boundary is a LAN with identified administrators.
+- Serving the public Internet. AIOS is designed for a local network with identified administrators.
 
 ## Decisions worth knowing
 
@@ -24,7 +24,7 @@ The choices behind AIOS, and the reasons for them. [Architecture](architecture.m
 
 **A privileged broker with a closed set of operations.** `aios-platform` runs as root and accepts only validated operations (network, TLS, power, backup, restore, updates). The backend never builds shell commands from input.
 
-**The catalogue only offers what can run.** Repositories publish more than models: vision projectors, split archives, speculative-decoding drafts, importance matrices, adapters. They are filtered out from the structure of their GGUF header, not from their names, and refused again at download, publication and start — so a mistake surfaces as a sentence, not as an obscure engine error. A vision projector is the one companion that is kept: it is downloaded with the model it belongs to and handed to llama.cpp, because without it a vision model silently loses its eyes.
+**The catalogue only offers what can run.** Repositories publish more than models: vision projectors, split archives, speculative-decoding drafts, importance matrices, adapters. They are recognised from the structure of their GGUF header, not from their names, and the same check runs again at download, publication and start, so what the catalogue offers is what the appliance loads. A vision projector is the one companion that is kept: it is downloaded with the model it belongs to and handed to llama.cpp, because without it a vision model silently loses its eyes.
 
 **Publishers, not fixed lists.** A hard-coded list of models can never see a release published after it was written. Repositories therefore query trusted publishers for their newest GGUF releases and keep the most recent distinct models that this appliance can run.
 
@@ -44,4 +44,4 @@ The choices behind AIOS, and the reasons for them. [Architecture](architecture.m
 
 ## History
 
-The project started from a single, long specification written for an AI coding agent, and was then driven by real installations on Proxmox: every defect found on that appliance — slow installs, empty catalogues, models that never answered, a console that asked for nothing — turned into a fix, a test and a rebuild. The current behaviour reflects that loop rather than the original document.
+The project started from a single, long specification written for an AI coding agent, and grew through real installations on Proxmox: each behaviour described here was exercised on that appliance, kept as a test and rebuilt into the image. What the documentation says is therefore what the current build does.

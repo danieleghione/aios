@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 parser=argparse.ArgumentParser(description='Sign an AIOS component release with an external Ed25519 private key')
-parser.add_argument('component',choices=['application','runtime','open-webui','platform'])
+parser.add_argument('component',choices=['application','runtime','imaging','voice','open-webui','cuda'])
 parser.add_argument('version')
 parser.add_argument('archive',type=Path)
 parser.add_argument('--private-key',required=True,type=Path)

@@ -22,3 +22,7 @@ CREATE TABLE IF NOT EXISTS benchmark_results(id TEXT PRIMARY KEY, created_at REA
 CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY, severity TEXT NOT NULL, message TEXT NOT NULL, created_at REAL NOT NULL, resolved INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS watchlists(id TEXT PRIMARY KEY, name TEXT NOT NULL, filters TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS system_jobs(id TEXT PRIMARY KEY, action TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT, created_at REAL NOT NULL);
+
+-- Keys for external clients (n8n, scripts, OpenAI SDKs): named, with an optional
+-- expiry, revocable one by one. Only a SHA-256 of the key is stored.
+CREATE TABLE IF NOT EXISTS api_keys(id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, created_by TEXT, created_at REAL NOT NULL, expires_at REAL, last_used REAL, revoked_at REAL);

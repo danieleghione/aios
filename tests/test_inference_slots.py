@@ -10,7 +10,8 @@ from aios.runtime import RuntimeConfig
 
 def config(parallel=1, timeout=5.0):
     # model_construct: the field validator forbids the sub-second timeouts tests need.
-    return RuntimeConfig.model_construct(parallel=parallel, timeout=timeout)
+    # CUSTOM: the slot count is exactly the one given, not AUTO's shared four.
+    return RuntimeConfig.model_construct(parallel=parallel, timeout=timeout, profile='CUSTOM')
 
 
 @pytest.fixture(autouse=True)

@@ -20,3 +20,13 @@ iso: image
 	./scripts/build-iso.sh
 test-iso:
 	./scripts/test-iso-qemu.sh
+
+.PHONY: cuda-package
+# The optional CUDA component for NVIDIA cards (see docs/gpu.md).
+cuda-package:
+	./scripts/build-cuda.sh
+
+.PHONY: lab-test
+# Install an ISO on a fresh lab VM and run every check (integration-tests/lab).
+lab-test:
+	integration-tests/lab/run.sh $(ISO)

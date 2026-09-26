@@ -7,6 +7,10 @@ cd "$(dirname "$0")/.."
 APT=(-o Acquire::ForceIPv4=true -o Acquire::Retries=5 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
 [[ $EUID == 0 ]] || exec sudo "$0" "$@"
 [[ -f dist/aios-x86_64.img ]] || { echo 'Run make image first'; exit 1; }
+# The release number travels in the file name, so installers on a share or a
+# USB stick say which version they are.
+source build/versions.env
+ISO="aios-installer-${AIOS_VERSION}-x86_64.iso"
 ROOT="$PWD/build/iso-rootfs"
 TREE="$ROOT/tmp/iso-tree"
 if [[ -e "$ROOT" ]]; then
@@ -135,14 +139,14 @@ for part in sys proc dev; do release "$ROOT/$part"; done
 mksquashfs "$ROOT" "$TREE/live/filesystem.squashfs" -noappend -comp zstd -Xcompression-level 3 -processors 2 -wildcards -e 'dev/*' 'proc/*' 'sys/*' 'run/*' 'tmp/*'
 mount --bind /dev "$ROOT/dev"
 chroot "$ROOT" grub-mkrescue -o /tmp/aios-installer.iso /tmp/iso-tree
-mv "$ROOT/tmp/aios-installer.iso" dist/aios-installer-x86_64.iso
+mv "$ROOT/tmp/aios-installer.iso" "dist/$ISO"
 # Bare file name, so the checksum verifies wherever the ISO is downloaded to.
-(cd dist && sha256sum aios-installer-x86_64.iso > aios-installer-x86_64.iso.sha256)
-python3 - <<'PY'
-import json, pathlib, subprocess
-root=pathlib.Path.cwd(); iso=root/'dist/aios-installer-x86_64.iso'
-info={'format':'ISO9660 optical UEFI installer','size_bytes':iso.stat().st_size,'sha256':(root/'dist/aios-installer-x86_64.iso.sha256').read_text().split()[0],'raw_base':json.loads((root/'dist/aios-x86_64-build-info.json').read_text()),'source_commit':subprocess.check_output(['git','-c','safe.directory='+str(root),'rev-parse','HEAD'],text=True).strip()}
+(cd dist && sha256sum "$ISO" > "$ISO.sha256")
+python3 - "$ISO" <<'PY'
+import json, pathlib, subprocess, sys
+root=pathlib.Path.cwd(); iso=root/'dist'/sys.argv[1]
+info={'format':'ISO9660 optical UEFI installer','size_bytes':iso.stat().st_size,'sha256':(root/'dist'/(sys.argv[1]+'.sha256')).read_text().split()[0],'raw_base':json.loads((root/'dist/aios-x86_64-build-info.json').read_text()),'source_commit':subprocess.check_output(['git','-c','safe.directory='+str(root),'rev-parse','HEAD'],text=True).strip()}
 (root/'dist/aios-installer-build-info.json').write_text(json.dumps(info,indent=2)+'\n')
 PY
 if [[ -n ${SUDO_UID:-} ]]; then chown "$SUDO_UID:$SUDO_GID" dist/aios-installer*; fi
-echo 'Built dist/aios-installer-x86_64.iso'
+echo "Built dist/$ISO"

@@ -1,0 +1,54 @@
+name: Hardware report
+description: Tell us how AIOS runs on your machine — good or bad. It helps tune the ratings and the GPU support.
+labels: [hardware]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: AIOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Bare metal, Proxmox VE, VMware, Hyper-V, QEMU/KVM, Other virtualisation]
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU and RAM
+      placeholder: e.g. Intel Core i5-1235U, 32 GB DDR4
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: As listed on the Hardware page (GPU acceleration card). "None" if there is none.
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu_used
+    attributes:
+      label: Was the GPU used?
+      options: [Yes, all layers, Yes, part of the layers, No — the model ran on the CPU, No GPU]
+  - type: textarea
+    id: models
+    attributes:
+      label: Models tried
+      description: Name and quantisation, the rating the catalogue gave, and whether it started. Tokens per second from the Dashboard if you have them.
+      placeholder: "Qwen3-8B Q4_K_M — OPTIMAL — started, 11 tok/s"
+    validations:
+      required: true
+  - type: textarea
+    id: profile
+    attributes:
+      label: Hardware profile
+      description: Portal → Hardware → "Full hardware profile" (expand and copy). Remove the hostname if you prefer.
+      render: json
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything unexpected?

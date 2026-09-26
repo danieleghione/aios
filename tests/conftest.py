@@ -10,7 +10,8 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'DATA', data)
     monkeypatch.setattr(core, 'ETC', etc)
     monkeypatch.setattr(core, 'DB', data/'database/aios.db')
-    for name in ('auth','hardware','providers','downloads','runtime','platform','app','accelerators','imaging'):
+    for name in ('auth','hardware','providers','downloads','runtime','platform','app','accelerators','imaging',
+                 'web','gateway','routes_accounts','routes_models','routes_system','alerts','speech','backups','notify','revisions','voice'):
         module = importlib.import_module('aios.' + name)
         if hasattr(module, 'DATA'):
             monkeypatch.setattr(module, 'DATA', data)

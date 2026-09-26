@@ -18,6 +18,10 @@ import time
 from .core import DATA
 
 LLAMA = os.environ.get('AIOS_LLAMA', '/opt/aios/runtime/bin/llama-server')
+# The optional CUDA package: llama.cpp's CUDA backend with the CUDA libraries it
+# needs, installed as a signed component. ggml loads it from outside the runtime
+# through GGML_BACKEND_PATH, beside the Vulkan backend the image always has.
+CUDA_DIR = os.environ.get('AIOS_CUDA_DIR', '/opt/aios/cuda')
 VULKANINFO = os.environ.get('AIOS_VULKANINFO', 'vulkaninfo')
 CACHE = 'system/accelerators.json'
 MiB = 1024 ** 2
@@ -33,10 +37,34 @@ _TYPES = {
 }
 
 
+def cuda_backend():
+    """The CUDA backend library when the package is installed, else None."""
+    path = os.path.join(CUDA_DIR, 'lib', 'libggml-cuda.so')
+    return path if os.path.isfile(path) else None
+
+
+def cuda_package():
+    """What the Hardware page says about the CUDA package."""
+    backend = cuda_backend()
+    try:
+        with open(os.path.join(CUDA_DIR, 'VERSION')) as reader:
+            version = reader.read().strip()
+    except OSError:
+        version = ''
+    return {'installed': bool(backend), 'version': version if backend else ''}
+
+
+def runtime_environment(library_path='/opt/aios/runtime/lib'):
+    """Variables for a llama.cpp process: its libraries, and the CUDA backend
+    and libraries when the package is installed."""
+    backend = cuda_backend()
+    if not backend:
+        return {'LD_LIBRARY_PATH': library_path}
+    return {'LD_LIBRARY_PATH': library_path + ':' + os.path.join(CUDA_DIR, 'lib'), 'GGML_BACKEND_PATH': backend}
+
+
 def _environment():
-    env = dict(os.environ)
-    env['LD_LIBRARY_PATH'] = '/opt/aios/runtime/lib'
-    return env
+    return {**os.environ, **runtime_environment()}
 
 
 def parse_devices(output):
@@ -85,11 +113,19 @@ def _run(command, timeout):
         return ''
 
 
+def prefer_cuda(devices):
+    """With the CUDA package an NVIDIA card is listed twice, once by each backend.
+    Keep it once, through CUDA: splitting a model across the same card twice
+    would only cost memory."""
+    cuda = {d['description'] for d in devices if d['name'].startswith('CUDA')}
+    return [d for d in devices if not (d['name'].startswith('Vulkan') and d['description'] in cuda)]
+
+
 def detect():
     """Probe now. Software renderers (llvmpipe) are never offered as a GPU: the
     CPU backend is faster than emulating a GPU on that same CPU. Setting
     AIOS_GPU_ALLOW_SOFTWARE=1 lets tests exercise the GPU path without one."""
-    devices = parse_devices(_run([LLAMA, '--list-devices'], 60))
+    devices = prefer_cuda(parse_devices(_run([LLAMA, '--list-devices'], 60)))
     physical = parse_vulkaninfo(_run([VULKANINFO, '--summary'], 30))
     found = classify(devices, physical)
     if os.environ.get('AIOS_GPU_ALLOW_SOFTWARE') != '1':
@@ -151,6 +187,59 @@ def device_arguments(devices):
     if not devices:
         return ['--device', 'none', '--n-gpu-layers', '0']
     return ['--device', ','.join(d['name'] for d in devices), '--n-gpu-layers', 'auto']
+
+
+VRAM_FILE = 'system/gpu-memory.json'
+NVIDIA_SMI = os.environ.get('AIOS_NVIDIA_SMI', 'nvidia-smi')
+SYSFS_DRM = os.environ.get('AIOS_SYSFS_DRM', '/sys/class/drm')
+
+
+def vram_usage():
+    """Dedicated GPU memory in use and in total, over every card that reports it:
+    NVIDIA through nvidia-smi, AMD through the amdgpu counters. None without one;
+    an integrated GPU uses system RAM, which the dashboard already shows."""
+    used = total = 0
+    if os.path.exists('/proc/driver/nvidia/version'):
+        for line in _run([NVIDIA_SMI, '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], 5).splitlines():
+            try:
+                u, t = (int(float(x)) * MiB for x in line.split(','))
+            except ValueError:
+                continue
+            used, total = used + u, total + t
+    for card in sorted(os.listdir(SYSFS_DRM)) if os.path.isdir(SYSFS_DRM) else []:
+        base = os.path.join(SYSFS_DRM, card, 'device')
+        try:
+            with open(os.path.join(base, 'mem_info_vram_used')) as u, open(os.path.join(base, 'mem_info_vram_total')) as t:
+                card_used, card_total = int(u.read()), int(t.read())
+        except (OSError, ValueError):
+            continue
+        # Only the cards themselves: connectors (card0-DP-1) lead to the same device.
+        if re.fullmatch(r'card\d+', card):
+            used, total = used + card_used, total + card_total
+    return {'used': used, 'total': total} if total else None
+
+
+def record_vram():
+    """Written by the runtime manager, which may open the GPUs; read by the dashboard."""
+    usage = vram_usage()
+    try:
+        path = DATA / VRAM_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**(usage or {}), 'at': time.time()}))
+    except OSError:
+        pass
+    return usage
+
+
+def recorded_vram(max_age=20):
+    """Percentage of dedicated GPU memory in use from the last fresh sample, or None."""
+    try:
+        sample = json.loads((DATA / VRAM_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    if time.time() - sample.get('at', 0) > max_age or not sample.get('total'):
+        return None
+    return round(100 * sample['used'] / sample['total'], 1)
 
 
 _OFFLOADED = re.compile(r'offloaded (\d+)/(\d+) layers to GPU')

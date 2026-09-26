@@ -1,0 +1,16 @@
+# Units the appliance enables. The image build enables them, and every boot
+# and every signed application release enables any that are new.
+aios-nvidia-driver.service
+aios-firstboot.service
+aios-control-plane.service
+aios-runtime-manager.service
+aios-download-worker.service
+aios-platform.service
+aios-open-webui.service
+aios-embedding.socket
+aios-console.service
+aios-local-console.service
+aios-serial-console.service
+aios-hardware-profiler.timer
+aios-repository-sync.timer
+aios-update-check.timer

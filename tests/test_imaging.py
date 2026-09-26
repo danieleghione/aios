@@ -145,7 +145,10 @@ async def test_an_image_model_is_installed_with_its_components(admin, environmen
 
     # A diffusion model is not a chat model: it must not reach the chat selector.
     assert admin.patch(f'/api/v1/aios/models/{key}', json={'published': True}).status_code == 200
-    assert admin.get('/v1/models').json()['data'] == []
+    (environment.ETC / 'secrets').mkdir(parents=True, exist_ok=True)
+    (environment.ETC / 'secrets/inference-key').write_text('test-key')
+    assert admin.get('/v1/models').status_code == 401
+    assert admin.get('/v1/models', headers={'Authorization': 'Bearer test-key'}).json()['data'] == []
     assert environment.setting('default_image_model') == key
 
     assert admin.delete(f'/api/v1/aios/models/{key}').status_code == 200
@@ -168,6 +171,10 @@ def test_the_chat_is_configured_to_ask_this_appliance_for_pictures():
     for line in ('ENABLE_IMAGE_GENERATION=true', 'IMAGE_GENERATION_ENGINE=openai',
                  'IMAGES_OPENAI_API_BASE_URL=http://127.0.0.1:8081/v1', 'IMAGES_OPENAI_API_KEY=$INFERENCE_KEY'):
         assert line in firstboot, line
+    # The Image button only generates directly with legacy function calling;
+    # natively it waits for the model to call a tool, which small models never do.
+    assert 'DEFAULT_MODEL_PARAMS=\'{"function_calling": "legacy"}\'' in firstboot
+    assert 'ENABLE_IMAGE_PROMPT_GENERATION=false' in firstboot
 
 
 def test_the_image_engine_is_built_and_verified_like_the_language_one():
@@ -186,10 +193,11 @@ def test_one_model_of_each_kind_may_be_loaded_at_once(environment, discovered, m
     environment.execute('INSERT INTO installed_models(id,path,sha256,installed_at,state,gguf) VALUES (?,?,?,?,?,?)',
                         (text_key, '/m.gguf', 'a' * 64, environment.now(), 'INSTALLED', '{"metadata": {}}'))
     # A language model does not block an image model, and neither blocks itself twice.
-    assert runtime.same_kind_conflict([text_key], image=True) is None
-    assert runtime.same_kind_conflict([image_key], image=False) is None
-    assert 'image model is already loaded' in runtime.same_kind_conflict([image_key], image=True)
-    assert 'language model is already loaded' in runtime.same_kind_conflict([text_key], image=False)
+    assert runtime.same_kind_conflict([text_key], 'image') is None
+    assert runtime.same_kind_conflict([image_key], 'text') is None
+    assert runtime.same_kind_conflict([image_key, text_key], 'speech') is None
+    assert 'image model is already loaded' in runtime.same_kind_conflict([image_key], 'image')
+    assert 'language model is already loaded' in runtime.same_kind_conflict([text_key], 'text')
 
 
 def test_the_recorded_port_is_the_one_the_engine_listens_on():
@@ -197,4 +205,133 @@ def test_the_recorded_port_is_the_one_the_engine_listens_on():
     listens on the image port must not be recorded on the language one."""
     source = (ROOT / 'backend/aios/runtime.py').read_text()
     assert 'SET pid=?,started_at=?,port=? WHERE id=?' in source
-    assert "row = {**row, 'port': runtime_port(metadata or {})}" in source
+    assert "row = {**row, 'port': engine.port}" in source
+
+
+def test_documents_in_the_chat_have_an_offline_embedding_model():
+    # Open WebUI runs offline: a model name is looked up online and never found,
+    # and every uploaded file failed with "No embedding model is loaded".
+    build = (ROOT / 'scripts/build-image.sh').read_text()
+    firstboot = (ROOT / 'scripts/firstboot.sh').read_text()
+    assert "local_dir='/opt/aios/embedding/all-MiniLM-L6-v2'" in build and 'embedding model verified offline' in build
+    assert 'RAG_EMBEDDING_MODEL=/opt/aios/embedding/all-MiniLM-L6-v2' in firstboot
+
+
+# Speech to text: the third engine, with the same rules as the other two.
+
+def speech_metadata(size=141 * 1024 ** 2, filename='ggml-base.en.bin'):
+    return {'kind': 'speech', 'family': 'whisper', 'filename': filename, 'size': size, 'display_name': 'Whisper base (English)'}
+
+
+def test_a_speech_model_is_recognised_and_stored_apart():
+    from aios import speech
+    assert speech.is_speech_model(speech_metadata()) and not speech.is_speech_model({'kind': 'image'})
+    assert str(speech.model_path('abc')).endswith('models/abc.bin')
+    assert speech.estimated_memory(speech_metadata(size=100)) == 100 + speech.WORKING_MEMORY
+
+
+def test_the_speech_engine_is_started_for_the_devices_it_has():
+    from aios.runtime import RuntimeConfig
+    from aios import speech
+    row = {'model_id': 'abc'}
+    config = RuntimeConfig(threads=3)
+    cpu = speech.arguments(row, config, [], speech_metadata())
+    assert cpu[0] == speech.BINARY and '--no-gpu' in cpu and cpu[cpu.index('--threads') + 1] == '3'
+    assert '--convert' in cpu and cpu[cpu.index('--port') + 1] == str(speech.PORT)
+    # The service cannot write to its working directory: transcoding needs a path it owns.
+    assert cpu[cpu.index('--tmp-dir') + 1].endswith('/runtime')
+    # An ".en" model transcribes English only, and says so to the engine.
+    assert cpu[cpu.index('--language') + 1] == 'en'
+    multilingual = speech.arguments(row, config, [], speech_metadata(filename='ggml-large-v3-turbo.bin'))
+    assert '--language' not in multilingual
+    gpu = speech.arguments(row, config, [{'name': 'Vulkan0', 'description': 'GPU', 'type': 'discrete'}], speech_metadata())
+    assert '--no-gpu' not in gpu
+    assert speech.environment([{'name': 'Vulkan1'}])['GGML_VK_VISIBLE_DEVICES'] == '1'
+    assert 'GGML_VK_VISIBLE_DEVICES' not in speech.environment([])
+
+
+def test_three_kinds_live_side_by_side(environment, discovered):
+    from aios import runtime
+    image_key, _ = image_model(environment, discovered)
+    speech_key = discovered()
+    environment.execute('UPDATE discovered_models SET metadata=? WHERE id=?', (environment.encode(speech_metadata()), speech_key))
+    environment.execute('INSERT INTO installed_models(id,path,sha256,installed_at,state,gguf) VALUES (?,?,?,?,?,?)',
+                        (speech_key, '/m.bin', 'a' * 64, environment.now(), 'INSTALLED', '{}'))
+    assert runtime.kind_of(runtime.model_metadata(speech_key)) == 'speech'
+    assert runtime.runtime_port(runtime.model_metadata(speech_key)) == 8092
+    assert runtime.same_kind_conflict([image_key], 'speech') is None
+    assert 'speech model is already loaded' in runtime.same_kind_conflict([speech_key], 'speech')
+
+
+def test_the_catalogue_reads_whisper_releases():
+    from aios.providers import SPEECH_REPO, speech_artifact, speech_name
+    assert speech_name('ggml-large-v3-turbo-q5_0.bin') == 'Whisper large v3 turbo · Q5_0'
+    assert speech_name('ggml-base.en.bin') == 'Whisper base (English)'
+    item = {'name': 'ggml-small.en-q8_0.bin', 'size': 82 * 1024 ** 2, 'sha256': 'b' * 64, 'url': 'https://huggingface.co/x'}
+    row = speech_artifact(SPEECH_REPO, 'rev', item, 'MIT', '2026-01-01')
+    assert row['kind'] == 'speech' and row['family'] == 'whisper' and row['quantization'] == 'Q8_0'
+    assert row['display_name'] == 'Whisper small (English) · Q8_0' and row['format'] == 'GGML'
+    # Superseded and experimental builds are left out, as are files of other kinds.
+    assert speech_artifact(SPEECH_REPO, 'rev', {**item, 'name': 'ggml-large-v2.bin'}, 'MIT', None) is None
+    assert speech_artifact(SPEECH_REPO, 'rev', {**item, 'name': 'ggml-small-tdrz.bin'}, 'MIT', None) is None
+    assert speech_artifact(SPEECH_REPO, 'rev', {**item, 'name': 'model.gguf'}, 'MIT', None) is None
+
+
+def test_a_speech_model_is_rated_on_its_own_terms():
+    from aios.hardware import compatibility
+    hw = {'ram': {'total': 4 * 1024 ** 3, 'available': 3 * 1024 ** 3}, 'physical_cores': 2, 'model_storage': {'free': 100 * 1024 ** 3},
+          'isa': ['avx2'], 'numa_nodes': {}, 'accelerators': []}
+    rated = compatibility(speech_metadata(), hw=hw)
+    assert rated['kind'] == 'speech' and rated['classification'] in ('OPTIMAL', 'COMPATIBLE')
+    assert any('Speech model' in reason for reason in rated['reasons'])
+    huge = compatibility(speech_metadata(size=6 * 1024 ** 3), hw=hw)
+    assert huge['classification'] == 'NOT_RECOMMENDED'
+
+
+def test_the_gateway_refuses_transcription_without_a_published_model(admin, environment):
+    (environment.ETC / 'secrets').mkdir(parents=True, exist_ok=True)
+    (environment.ETC / 'secrets/inference-key').write_text('test-key')
+    answer = admin.post('/v1/audio/transcriptions', headers={'Authorization': 'Bearer test-key'},
+                        files={'file': ('a.wav', b'RIFF....WAVE', 'audio/wav')})
+    assert answer.status_code == 409 and 'speech model' in answer.json()['error']['message']
+    assert admin.post('/api/v1/aios/speech/transcribe', files={'file': ('a.wav', b'RIFF', 'audio/wav')}).status_code == 409
+    assert admin.post('/v1/audio/transcriptions', files={'file': ('a.wav', b'RIFF', 'audio/wav')}).status_code == 401
+
+
+def test_the_chat_microphone_is_pointed_at_the_appliance():
+    firstboot = (ROOT / 'scripts/firstboot.sh').read_text()
+    for line in ('AUDIO_STT_ENGINE=openai', 'AUDIO_STT_OPENAI_API_BASE_URL=http://127.0.0.1:8081/v1',
+                 'AUDIO_STT_OPENAI_API_KEY=$INFERENCE_KEY'):
+        assert line in firstboot, line
+
+
+def test_the_speech_engine_is_built_like_the_other_two():
+    build = (ROOT / 'scripts/build-voice.sh').read_text()
+    assert '-DGGML_VULKAN=ON' in build and '-DGGML_CPU_ALL_VARIANTS=ON' in build and '-DGGML_BACKEND_DL=ON' in build
+    assert 'ln -sf "../lib/$(basename "$backend")"' in build  # ggml looks beside the executable
+    assert './scripts/build-voice.sh' in (ROOT / 'scripts/build-image.sh').read_text()
+
+
+def test_the_portal_may_try_a_model_it_has_not_published(environment, discovered, monkeypatch):
+    """Publishing decides what the chat and the API may use; the operator can
+    still transcribe or draw with a model that is only installed."""
+    import asyncio
+    from aios import gateway
+    key = discovered()
+    environment.execute('UPDATE discovered_models SET metadata=? WHERE id=?', (environment.encode(speech_metadata()), key))
+    environment.execute('INSERT INTO installed_models(id,path,sha256,installed_at,state,published,gguf,config) VALUES (?,?,?,?,?,0,?,?)',
+                        (key, '/m.bin', 'a' * 64, environment.now(), 'INSTALLED', '{}', '{}'))
+    loaded = []
+    monkeypatch.setattr(gateway, 'settle', lambda model_id, states, timeout: _settled(loaded, model_id))
+    with pytest.raises(Exception) as published_only:
+        asyncio.run(gateway.ensure_running(key))
+    assert '404' in str(published_only.value) or 'not installed' in str(published_only.value)
+    # The same model, asked for the way the portal asks, gets as far as loading.
+    with pytest.raises(Exception) as attempted:
+        asyncio.run(gateway.ensure_running(key, published_only=False))
+    assert loaded == [key] and '503' in str(attempted.value)
+
+
+async def _settled(loaded, model_id):
+    loaded.append(model_id)
+    return {'state': 'FAILED', 'error': 'no engine in a test'}

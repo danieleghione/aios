@@ -52,3 +52,53 @@ def test_no_pending_flag_when_nothing_changed(admin, environment, model):
     assert admin.post(f'/api/v1/aios/runtime/{model}/start').status_code == 200
     item = admin.get('/api/v1/aios/runtime').json()['items'][0]
     assert item['pending_restart'] is False
+
+
+def test_auto_profile_shares_four_slots_over_one_kv_cache():
+    from aios.runtime import RuntimeConfig, parallel_slots
+    assert parallel_slots(RuntimeConfig(context=32768), 32768) == 4
+    assert parallel_slots(RuntimeConfig(context=4096), 4096) == 1
+    assert parallel_slots(RuntimeConfig(profile='BALANCED', context=32768), 32768) == 1
+    assert parallel_slots(RuntimeConfig(parallel=2, context=32768), 32768) == 2
+
+
+def test_an_engine_killed_for_memory_is_reported_plainly(tmp_path):
+    import signal
+    from aios.runtime import load_failure
+    assert 'ran out of memory' in load_failure(tmp_path / 'missing.log', -signal.SIGKILL)
+
+
+def test_the_kernel_picks_the_engine_not_the_manager():
+    from pathlib import Path
+    from aios.runtime import EXPENDABLE
+    assert EXPENDABLE[:2] == ['/bin/sh', '-c'] and 'oom_score_adj' in EXPENDABLE[2] and 'exec "$0" "$@"' in EXPENDABLE[2]
+    unit = (Path(__file__).resolve().parents[1] / 'systemd/aios-runtime-manager.service').read_text()
+    assert 'OOMPolicy=continue' in unit
+
+
+def test_short_memory_unloads_the_other_kind(monkeypatch):
+    import asyncio
+    from aios import runtime
+    updates = []
+    monkeypatch.setattr(runtime, 'one', lambda *a: {'model_id': 'm-text'})
+    monkeypatch.setattr(runtime, 'execute', lambda sql, args=(): updates.append((sql, args)))
+    monkeypatch.setattr(runtime, 'audit', lambda *a, **k: None)
+
+    class Process:
+        returncode = None
+        def poll(self): return self.returncode
+        def send_signal(self, _): self.returncode = 0
+        def wait(self, *_): return 0
+
+    children = {'text': Process()}
+    memory = type('M', (), {'available': 1 * 2**30})
+    monkeypatch.setattr(runtime.psutil, 'virtual_memory', lambda: memory)
+    monkeypatch.setattr(runtime, 'memory_needed', lambda metadata, image: 3 * 2**30)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(runtime.asyncio, 'sleep', lambda *_: real_sleep(0))
+    asyncio.run(runtime.make_room('image', {'display_name': 'SD'}, True, children))
+    assert children == {} and any("state='STOPPED'" in sql and args == ('text',) for sql, args in updates)
+    memory.available = 8 * 2**30
+    kept = {'text': Process()}
+    asyncio.run(runtime.make_room('image', {}, True, kept))
+    assert 'text' in kept

@@ -1,0 +1,24 @@
+[Unit]
+Description=AIOS embedding model (all-MiniLM-L6-v2)
+Requires=aios-embedding.socket
+After=aios-firstboot.service
+[Service]
+User=aios-webui
+Group=aios-webui
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=HOME=/var/lib/aios/webui
+Environment=OMP_NUM_THREADS=2
+ExecStart=/opt/aios/webui/bin/python -P /opt/aios/app/backend/aios/embedding_server.py
+Restart=on-failure
+RestartSec=5
+MemoryMax=2G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=no
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+UMask=0077

@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-from aios import app
+from aios import gateway as app
 
 
 @pytest.fixture

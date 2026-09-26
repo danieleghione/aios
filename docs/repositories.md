@@ -1,6 +1,6 @@
 # Repositories
 
-A repository that has not been configured yet — the GitHub provider without repositories, an Internal or HTTP manifest without a URL — reports **NOT CONFIGURED** with the reason, not ERROR: nothing is broken, it is waiting for a decision. Providers come preconfigured but disabled. Enabling one is an administrative decision; no release is ever installed automatically. The Internal provider has no initial URL because it depends on your own LAN: set the address of your HTTPS server. No provider answer is ever simulated.
+A repository still waiting for its configuration — the GitHub provider without repositories, an Internal or HTTP manifest without a URL — reports **NOT CONFIGURED** and states what it needs. Providers come preconfigured but disabled. Enabling one is an administrative decision; no release is ever installed automatically. The Internal provider has no initial URL because it depends on your own LAN: set the address of your HTTPS server. No provider answer is ever simulated.
 
 ## Hugging Face
 
@@ -76,3 +76,19 @@ Available filters: author, architecture, quantization, license, keyword, max_siz
 For a LAN registry, enable `allow_private` explicitly; loopback, link-local and metadata service addresses stay forbidden. The connection uses the validated IP with the original Host/SNI to prevent DNS rebinding. HTTPS with certificate verification is mandatory; the proxy configured under System is explicit and never inherited from a development environment. Tokens are sent only to the provider host and dropped on redirects to other hosts. API redirects are revalidated, up to five, including upstream repository renames.
 
 Integration sources: [Hugging Face Hub API](https://huggingface.co/docs/hub/api), [ModelScope Hub](https://github.com/modelscope/modelscope/tree/master/modelscope/hub), [GitHub REST releases](https://docs.github.com/en/rest/releases/releases).
+
+## Signed catalogues
+
+An internal or HTTP repository can publish a manifest signed with Ed25519, so an appliance can take its catalogue from a mirror without trusting it. Put the **public** key in the repository's provider options:
+
+```json
+{"public_key": "-----BEGIN PUBLIC KEY-----\nMCow...\n-----END PUBLIC KEY-----\n"}
+```
+
+The publisher signs the manifest on their own machine — the private key never reaches the appliance:
+
+```bash
+scripts/sign-catalog.py manifest.json --private-key catalogue.key
+```
+
+The script adds a `signature` field covering the rest of the document, in canonical JSON (sorted keys, no spaces). With a key configured, AIOS refuses a manifest that is unsigned, altered or signed by anyone else, and the repository shows the reason. Without a key the manifest is read as before: nothing changes for the repositories shipped with the appliance.

@@ -103,7 +103,7 @@ def console_verify(username, password, identity='console'):
     execute('DELETE FROM login_attempts WHERE identity=?', (identity,))
     return user, None
 
-def authenticate(data, identity):
+def authenticate(data, identity, client=''):
     attempt = one('SELECT * FROM login_attempts WHERE identity=?', (identity,))
     if attempt and attempt['until'] > now():
         raise HTTPException(429, 'Login temporarily locked')
@@ -120,6 +120,8 @@ def authenticate(data, identity):
     execute('DELETE FROM login_attempts WHERE identity=?', (identity,))
     token, csrf = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
     execute('DELETE FROM sessions WHERE expires<?', (now(),))
-    execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(token), user['id'], csrf, now() + 28800))
+    execute('INSERT INTO sessions(token_hash,user_id,csrf,expires,created,client) VALUES (?,?,?,?,?,?)',
+            (digest(token), user['id'], csrf, now() + 28800, now(), client[:200]))
+    execute('UPDATE users SET last_login=? WHERE id=?', (now(), user['id']))
     audit(user['id'], 'login')
     return token, csrf

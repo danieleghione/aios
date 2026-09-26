@@ -1,6 +1,6 @@
 # Models and runtimes
 
-Discovery downloads metadata only. Every source/revision pair keeps its own UUID; a new revision never replaces an installation by itself. Weights are stored under their UUID, whatever they are called upstream.
+Discovery downloads metadata only. Every source/revision pair keeps its own UUID; a new revision never replaces an installation by itself. When a synchronisation finds a later revision of an installed file whose content differs, the model is marked **UPDATE AVAILABLE** and the Dashboard says so. *Update* installs the new revision beside the old one; once it is verified it takes over the runtime configuration, notes, publication and the default of its kind, and the previous revision stays installed, unpublished and marked **PREVIOUS REVISION**, until you delete it. A revision under another licence asks for the licence to be accepted first. Weights are stored under their UUID, whatever they are called upstream.
 
 Lifecycle: DISCOVERED → QUEUED → DOWNLOADING → VERIFYING → INSTALLED → PUBLISHED. FAILED records the error and the retries; PAUSED and CANCELLED are queue states. DISABLED marks an installation whose file is gone, for example after a restore without weights. Publishing and installing stay separate.
 
@@ -16,7 +16,7 @@ The default context is **101024 tokens**: not a promise, but the maximum asked f
 
 A single language model is kept loaded — stop or unload frees the RAM before the next start — beside at most one image model, which uses a different engine ([image generation](image-generation.md)). Published but inactive models are listed by `/v1/models`, and requests get 409 until they are started. The gateway keeps SSE streaming, timeouts and concurrency limits. Open WebUI uses the local inference key automatically, stored at `/etc/aios/secrets/inference-key`.
 
-An explicit HugeTLB request is refused by the backend when it is not supported: reserving pages in the kernel does not mean llama.cpp uses them. Transparent HugePages depend on the kernel policy. 1 GiB pages, AMX and advanced NUMA need suitable hardware and kernels, and are not switched on blindly. Upstream picks the best CPU backend among those compiled in.
+HugePages are reserved in the kernel from the portal and used transparently by the runtime, following the kernel policy. 1 GiB pages, AMX and advanced NUMA need suitable hardware and kernels, and are not switched on blindly. Upstream picks the best CPU backend among those compiled in.
 
 The real inference test uses `ggml-org/models/tinyllamas/stories260K.gguf`, about 1.2 MB, downloaded only inside the test VM and never shipped in the image. It is a tiny model for checking execution and the API, not conversation quality. The offline test fixture is synthetic GGUF data and is never treated as a runnable LLM.
 
@@ -29,7 +29,7 @@ The catalogue only lists files this appliance can run on its own. Discovery ther
 - **speculative-decoding drafts** (`mtp-`, `dflash-`, `dspark-` and the like) and other non-model GGUF files (importance matrices, LoRA adapters). They are recognised from the structure of the header, not from the name: a file is excluded when `general.type` is not `model`, when it declares `<arch>.target_layers` (the layers of another model it reads from), or when it holds far fewer tensors than its declared blocks;
 - **architectures the bundled llama.cpp cannot load**, checked against the list recorded from its own sources at build time.
 
-The same files are refused at download, publication and start, so a model installed before these checks existed cannot reach the chat and fail there with an obscure error.
+The same check runs at download, publication and start, so the chat is offered only the models the appliance can serve.
 
 ## Image generation
 

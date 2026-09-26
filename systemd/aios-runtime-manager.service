@@ -17,6 +17,10 @@ Environment=LD_LIBRARY_PATH=/opt/aios/runtime/lib
 EnvironmentFile=-/etc/aios/proxy.env
 ExecStart=/opt/aios/venv/bin/python -m aios runtime
 Restart=on-failure
+# A model killed for memory is reported by the manager; it must not stop the
+# unit and every other loaded model with it.
+OOMPolicy=continue
+OOMScoreAdjust=-200
 RestartSec=5
 TimeoutStopSec=30
 NoNewPrivileges=yes

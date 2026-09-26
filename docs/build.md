@@ -18,20 +18,24 @@ Install Node.js 22.22.1 or a later 22 release from the official Node.js distribu
 make build        # backend and frontend
 make test         # lint, types, backend and frontend tests
 make image        # dist/aios-x86_64.img
-make iso          # dist/aios-installer-x86_64.iso (builds the image first)
+make iso          # dist/aios-installer-<version>-x86_64.iso (builds the image first)
 make test-image   # boots the raw image in QEMU
 make test-iso     # boots the ISO in QEMU and installs it on an empty disk
 ```
 
-`make image` installs the application dependencies, creates or reuses `build/rootfs`, compiles both inference engines — llama.cpp (`scripts/build-runtime.sh`) and stable-diffusion.cpp (`scripts/build-imaging.sh`) — with every x86 CPU variant and the Vulkan backend ( the first time this takes one to two hours on a small host, an interrupted compile resumes where it stopped and falls back to one job when memory runs out), installs the Ubuntu hardware enablement kernel, the Mesa and NVIDIA Vulkan drivers and the NVIDIA kernel module packages for that kernel, installs Open WebUI, generates the initramfs, partitions, bootloaders, splash theme and checksums. It uses loop devices and mounts under `/mnt/aios-build.*`; it never partitions a physical disk. The destructive installer is a separate program and is never run by the build.
+`make image` installs the application dependencies, creates or reuses `build/rootfs`, compiles the inference engines — llama.cpp with its speech generation tool (`scripts/build-runtime.sh`), stable-diffusion.cpp (`scripts/build-imaging.sh`) and whisper.cpp (`scripts/build-voice.sh`) — with every x86 CPU variant and the Vulkan backend ( the first time this takes one to two hours on a small host, an interrupted compile resumes where it stopped and falls back to one job when memory runs out), installs the Ubuntu hardware enablement kernel, the Mesa and NVIDIA Vulkan drivers and the NVIDIA kernel module packages for that kernel, installs Open WebUI, generates the initramfs, partitions, bootloaders, splash theme and checksums. It uses loop devices and mounts under `/mnt/aios-build.*`; it never partitions a physical disk. The destructive installer is a separate program and is never run by the build.
 
 Output:
 
 - `dist/aios-x86_64.img` — sparse raw disk of 13 GiB logical size;
-- `dist/aios-installer-x86_64.iso` — bootable installer (BIOS and UEFI), about 3.2 GB;
+- `dist/aios-installer-<version>-x86_64.iso` — bootable installer, named after the release number (BIOS and UEFI), about 3.2 GB;
 - `dist/*.sha256` — checksums;
 - `dist/aios-x86_64-build-info.json` and `dist/aios-installer-build-info.json` — the versions and package inventories actually used;
 - `dist/qemu-test-report.json` — the result of the VM verification.
+
+**Release files.** `scripts/release-parts.sh` splits the ISO into parts of 600 MB for a GitHub release, with the checksum of the whole ISO, in `dist/release`; the installation instructions join and verify them. `make cuda-package` builds the optional CUDA component, published beside them ([GPU acceleration](gpu.md#cuda-for-nvidia-cards-optional)).
+
+**The release number** lives in `VERSION`. `scripts/set-version.sh 1.12.4` sets it everywhere it appears — `VERSION`, `build/versions.env`, the Python and portal packages and the installation instructions — and the portal, the API and the Hardware page read it at run time; `make test` fails if any copy differs.
 
 The build is automatable and versioned, but not bit-for-bit deterministic: UUIDs, timestamps and refreshed Ubuntu security packages vary. The `build/*.lock` inventories and the build info record exactly what was produced. The llama.cpp commit is pinned in `build/versions.env`; Open WebUI and the downstream patches are versioned. Do not promise binary reproducibility without a snapshot mirror of the OS packages.
 

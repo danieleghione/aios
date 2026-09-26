@@ -34,9 +34,11 @@ async def test_download_verify_install_publish(admin,environment,discovered,tiny
     monkeypatch.setattr(downloads,'request_target',lambda url,headers,*args:(url,headers,{}))
     await downloads.download(job)
     assert environment.one('SELECT state FROM downloads WHERE id=?',(job['id'],))['state']=='INSTALLED'
-    assert admin.get('/v1/models').json()['data']==[]
+    (environment.ETC/'secrets').mkdir(parents=True,exist_ok=True)
+    (environment.ETC/'secrets/inference-key').write_text('test-key')
+    assert admin.get('/v1/models',headers={'Authorization':'Bearer test-key'}).json()['data']==[]
     assert admin.patch(f'/api/v1/aios/models/{key}',json={'published':True}).status_code==200
-    assert admin.get('/v1/models').json()['data'][0]['id']==key
+    assert admin.get('/v1/models',headers={'Authorization':'Bearer test-key'}).json()['data'][0]['id']==key
     assert admin.post(f'/api/v1/aios/runtime/{key}/start').status_code==200
     assert admin.delete(f'/api/v1/aios/models/{key}').status_code==409
     environment.execute("UPDATE runtime_instances SET desired='STOPPED' WHERE model_id=?",(key,))

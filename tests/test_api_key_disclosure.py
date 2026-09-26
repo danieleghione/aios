@@ -63,7 +63,7 @@ def test_guessing_over_ssh_does_not_lock_the_console(keyed):
     assert result.returncode == 0 and KEY in result.stdout
 
 
-def test_recovery_account_gets_exactly_one_more_sudo_invocation(settings_factory=None):
+def test_recovery_account_gets_exactly_one_more_sudo_invocation(monkeypatch):
     import importlib.util
     from pathlib import Path
     spec = importlib.util.spec_from_file_location('cfg', Path('installer/configure.py'))
@@ -71,7 +71,9 @@ def test_recovery_account_gets_exactly_one_more_sudo_invocation(settings_factory
     spec.loader.exec_module(cfg)
     import tempfile
     root = Path(tempfile.mkdtemp())
-    cfg.subprocess.run = lambda *a, **k: None
+    # monkeypatch, not assignment: the module is shared, and a permanent stub
+    # made later tests that really run a command silently do nothing.
+    monkeypatch.setattr(cfg.subprocess, 'run', lambda *a, **k: None)
     key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ9k3mKQdpWJ0Fv8dYrVqTt6uLmXcE2Rb1oPzN4hSgYw lab@example'
     cfg.apply(root, dict(hostname='aios', locale='it_IT.UTF-8', keyboard='it', interface='ens18', dhcp=True, address='',
                          gateway='', dns=[], timezone='Europe/Rome', ntp=True, ntp_servers=['ntp.ubuntu.com'], manual_time='',

@@ -21,7 +21,9 @@ The catalogue marks them **IMAGE MODEL**. The Repositories page has an *Image mo
 
 ## Generating a picture
 
-**From the chat.** Open WebUI's image button is configured to ask this appliance: the request goes to the gateway with the local inference key, and the published diffusion model answers. If none is published, the chat shows a clear message instead of a mysterious failure.
+**From the chat.** In Open WebUI open the *Integrations* menu (the icon beside **+** under the message box), switch on **Image** and write what you want to see. The chat shows *Creating image*, sends your text to the gateway with the local inference key, and the published diffusion model draws it; the picture appears in the conversation, then the language model adds a short reply. Your words are used as the prompt as they are, so the picture starts at once. If no image model is published, the chat says so.
+
+The appliance sets Open WebUI's function calling to *legacy*, which is what makes the Image switch draw the picture itself instead of leaving it to a tool call the model would have to make. Keep that setting under *Admin Settings → Models*.
 
 **From the portal.** Under **Installed models**, an image model has a *Generate a picture* button: prompt, size and steps, and the result appears in the page with the time it took. It is the quickest way to check the engine after installing a model.
 
@@ -54,9 +56,9 @@ The gateway therefore allows a request to run for up to 30 minutes, where a chat
 
 Every file of a diffusion model is held in memory for the whole pass — there is no memory-mapped eviction as for a language model — plus about 1.5 GiB of working buffers. The catalogue rating for an image model counts exactly that, and says so in its reasons.
 
-## Limits
+## What it covers
 
-- No video models, no image editing from the portal, no LoRA management yet: the engine supports them, AIOS does not expose them.
-- Models whose components are published only in gated repositories (FLUX.1 dev, SD 3.5) need a repository token; they are not offered by default.
+- Text to picture, from the chat, the portal and the API, with the three families above.
+- Models whose components are published in gated repositories (FLUX.1 dev, SD 3.5) become available once the repository carries a token for them.
 - The chat sends its own defaults (512×512, 20 steps) unless an administrator changes them in Open WebUI.
 - Image models never appear in the chat's model selector: they answer `/v1/images/generations`, not `/v1/chat/completions`.

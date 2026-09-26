@@ -4,11 +4,12 @@ import json
 
 
 def forbid_profile(monkeypatch):
-    from aios import app, hardware
+    from aios import hardware, routes_models, routes_system
     def boom():
         raise AssertionError('profile() called on a hot path')
     monkeypatch.setattr(hardware, 'profile', boom)
-    monkeypatch.setattr(app, 'profile', boom)
+    monkeypatch.setattr(routes_system, 'profile', boom)
+    monkeypatch.setattr(routes_models, 'compatibility', __import__('aios.hardware', fromlist=['x']).compatibility)
 
 
 def test_catalog_does_not_profile(admin, monkeypatch, discovered):

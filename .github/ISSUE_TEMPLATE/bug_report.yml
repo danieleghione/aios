@@ -1,0 +1,42 @@
+name: Bug report
+description: Something in AIOS does not work as documented.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: AIOS version
+      description: Shown at the bottom of every portal page, and the name of the ISO you installed.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where does it happen?
+      options: [Installer, Console, Admin portal, Chat (Open WebUI), API, Model download, Model start or answers, Image generation, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. …\n2. …"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: From the portal, Logs page (choose the service) or the runtime log of the model. Remove anything private.
+      render: text
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Bare metal or virtual (Proxmox, VMware, QEMU…), CPU, RAM, GPU.

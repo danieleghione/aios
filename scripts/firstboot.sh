@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 mkdir -p /etc/aios/secrets /var/lib/aios /var/log/aios
 chmod 700 /etc/aios/secrets
+# An application release brings its units, NGINX site and firewall rules with
+# it; install whatever changed before the services start (see system_files.py).
+PYTHONPATH=/opt/aios/app/backend /opt/aios/venv/bin/python -m aios.system_files /opt/aios/app || true
 # Expand only the data partition on the appliance's own root disk.
 DATADEV=$(findmnt -n -o SOURCE /var/lib/aios)
 PARENT=$(lsblk -ndo PKNAME "$DATADEV")
@@ -53,7 +56,7 @@ ENV
   chmod 600 /etc/aios/webui.env
 fi
 # Also reconcile restored installations: AIOS is the login authority.
-sed -i -E '/^(WEBUI_ADMIN_(EMAIL|PASSWORD|NAME)|WEBUI_AUTH_TRUSTED_(EMAIL|NAME|ROLE)_HEADER|WEBUI_AUTH_SIGNOUT_REDIRECT_URL|ENABLE_PASSWORD_AUTH|ENABLE_(TITLE|TAGS|FOLLOW_UP|AUTOCOMPLETE|SEARCH_QUERY|RETRIEVAL_QUERY)_GENERATION|TASK_MODEL_PARAMS|DEFAULT_MODEL_METADATA|ENABLE_IMAGE_GENERATION|IMAGE_GENERATION_ENGINE|IMAGE_GENERATION_MODEL|IMAGES_OPENAI_API_(BASE_URL|KEY)|IMAGE_SIZE|IMAGE_STEPS)=/d' /etc/aios/webui.env
+sed -i -E '/^(WEBUI_ADMIN_(EMAIL|PASSWORD|NAME)|WEBUI_AUTH_TRUSTED_(EMAIL|NAME|ROLE)_HEADER|WEBUI_AUTH_SIGNOUT_REDIRECT_URL|ENABLE_PASSWORD_AUTH|ENABLE_(TITLE|TAGS|FOLLOW_UP|AUTOCOMPLETE|SEARCH_QUERY|RETRIEVAL_QUERY)_GENERATION|TASK_MODEL_PARAMS|DEFAULT_MODEL_METADATA|ENABLE_IMAGE_GENERATION|IMAGE_GENERATION_ENGINE|IMAGE_GENERATION_MODEL|IMAGES_OPENAI_API_(BASE_URL|KEY)|IMAGE_SIZE|IMAGE_STEPS|DEFAULT_MODEL_PARAMS|ENABLE_IMAGE_PROMPT_GENERATION|RAG_EMBEDDING_MODEL|AUDIO_STT_(ENGINE|MODEL|OPENAI_API_(BASE_URL|KEY)))=/d' /etc/aios/webui.env
 cat >> /etc/aios/webui.env <<'ENV'
 WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-AIOS-Email
 WEBUI_AUTH_TRUSTED_NAME_HEADER=X-AIOS-Name
@@ -78,6 +81,17 @@ ENABLE_SEARCH_QUERY_GENERATION=false
 ENABLE_RETRIEVAL_QUERY_GENERATION=false
 DEFAULT_MODEL_METADATA='{"capabilities": {"builtin_tools": false}}'
 ENV
+# With "native" function calling, Open WebUI leaves the chat's Image button to the
+# model, which has to call a generate_image tool: the built-in tools are off
+# above and small local models do not call tools anyway, so the button did
+# nothing and the model just talked. "legacy" generates the picture directly
+# (and injects attached documents into the prompt, which small models handle).
+cat >> /etc/aios/webui.env <<'ENV'
+DEFAULT_MODEL_PARAMS='{"function_calling": "legacy"}'
+ENV
+# Documents in the chat are embedded by the model shipped in the image: offline,
+# a model name would be looked up online and never found.
+echo 'RAG_EMBEDDING_MODEL=/opt/aios/embedding/all-MiniLM-L6-v2' >> /etc/aios/webui.env
 # Image generation goes through the same gateway and the same key: the appliance
 # routes it to the published diffusion model, and answers with a clear error when
 # there is none. Sizes and steps stay small because most machines have no GPU.
@@ -90,8 +104,20 @@ IMAGES_OPENAI_API_BASE_URL=http://127.0.0.1:8081/v1
 IMAGES_OPENAI_API_KEY=$INFERENCE_KEY
 IMAGE_SIZE=512x512
 IMAGE_STEPS=20
+ENABLE_IMAGE_PROMPT_GENERATION=false
+ENV
+# The microphone in the chat transcribes on the appliance: the same gateway, the
+# same key, the speech model published in the portal.
+cat >> /etc/aios/webui.env <<ENV
+AUDIO_STT_ENGINE=openai
+AUDIO_STT_MODEL=aios-speech
+AUDIO_STT_OPENAI_API_BASE_URL=http://127.0.0.1:8081/v1
+AUDIO_STT_OPENAI_API_KEY=$INFERENCE_KEY
 ENV
 rm -f /etc/aios/secrets/webui-bootstrap
+# Settings Open WebUI has already saved win over the environment above: point the
+# saved ones back at this appliance before the chat starts (see webui_config.py).
+PYTHONPATH=/opt/aios/app/backend /opt/aios/venv/bin/python -m aios.webui_config /var/lib/aios/webui/webui.db /etc/aios/secrets/inference-key || true
 chown -R aios-webui:aios-webui /var/lib/aios/webui
 /opt/aios/venv/bin/python - <<'PYTHON'
 from aios.core import setting, execute, uid, now

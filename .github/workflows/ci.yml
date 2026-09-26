@@ -2,6 +2,11 @@ name: AIOS verification
 on:
   push:
   pull_request:
+  schedule:
+    # Nightly: the shipped repositories against the real services.
+    - cron: '17 3 * * *'
+    # Weekly: build the image and boot it in QEMU (software Vulkan, no GPU).
+    - cron: '43 4 * * 0'
   workflow_dispatch:
     inputs:
       image:
@@ -27,8 +32,19 @@ jobs:
       - run: make test
       - run: .venv/bin/pip install pip-audit && .venv/bin/pip-audit
       - run: npm --prefix frontend-admin audit --audit-level=moderate
+  live-repositories:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+      - run: python -m venv .venv && .venv/bin/pip install .
+      - run: AIOS_DATA=$RUNNER_TEMP/data AIOS_ETC=$RUNNER_TEMP/etc .venv/bin/python integration-tests/live_repositories.py
   image:
-    if: github.event_name == 'workflow_dispatch' && inputs.image
+    if: (github.event_name == 'workflow_dispatch' && inputs.image) || (github.event_name == 'schedule' && github.event.schedule == '43 4 * * 0')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

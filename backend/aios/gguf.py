@@ -119,7 +119,8 @@ def inspect_gguf(path):
     if kind:
         raise ValueError(f'This file is a GGUF of type "{kind}" (for example an importance matrix or a LoRA adapter), not a model; install the model itself instead')
     if not isinstance(architecture, str):
-        raise ValueError('Missing architecture')
+        raise ValueError('This GGUF names no model architecture, so llama.cpp cannot run it: it is usually a diffusion model '
+                         'converted for stable-diffusion.cpp. Image models are installed from the Image models repository')
     blocks = {name.split('.')[1] for name in names if name.startswith('blk.') and name.split('.')[1].isdigit()}
     if draft_reason(architecture, metadata, tensors, blocks, names):
         raise ValueError(DRAFT_MESSAGE)

@@ -13,6 +13,7 @@ ROOT="$PWD/build/rootfs"
 ./scripts/build-runtime.sh
 # stable-diffusion.cpp, the second engine: image models, same backends, own prefix.
 ./scripts/build-imaging.sh
+./scripts/build-voice.sh
 rm -f "$ROOT/etc/resolv.conf"
 cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
 if [[ ! -x "$ROOT/usr/sbin/locale-gen" || ! -x "$ROOT/bin/setupcon" && ! -x "$ROOT/usr/bin/setupcon" ]]; then
@@ -102,9 +103,16 @@ for backend in "$ROOT"/opt/aios/runtime/lib/libggml-cpu*.so "$ROOT"/opt/aios/run
   ln -sf "../lib/$(basename "$backend")" "$ROOT/opt/aios/runtime/bin/$(basename "$backend")"
 done
 mkdir -p "$ROOT/opt/aios/app" "$ROOT/etc/aios" dist
-rsync -a --delete --exclude=.git --exclude=.venv --exclude=build --exclude=dist --exclude=node_modules --exclude=__pycache__ --exclude=.pytest_cache --exclude=.mypy_cache --exclude=.ruff_cache ./ "$ROOT/opt/aios/app/"
+rsync -a --delete --exclude=.git --exclude=.venv --exclude=build --exclude=dist --exclude=node_modules --exclude=__pycache__ --exclude=.pytest_cache --exclude=.mypy_cache --exclude=.ruff_cache --exclude=internal --exclude=tests --exclude=integration-tests --exclude=.github ./ "$ROOT/opt/aios/app/"
+# Working notes, tests (with their fake keys) and CI stay in the repository, never on an appliance.
+rm -rf "$ROOT/opt/aios/app/internal" "$ROOT/opt/aios/app/tests" "$ROOT/opt/aios/app/integration-tests" "$ROOT/opt/aios/app/.github"
+if grep -rIlE -- "-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|github_pat[_]|gh[p]_[A-Za-z0-9]{20}" "$ROOT/opt/aios/app"; then echo "Refusing to build: a key or token is in the application tree" >&2; exit 1; fi
 mkdir -p "$ROOT/opt/aios/app/frontend-admin/dist"
 rsync -a --delete frontend-admin/dist/ "$ROOT/opt/aios/app/frontend-admin/dist/"
+# The application belongs to root and is read-only for the services that run it,
+# whatever owner and mode the build checkout had.
+chown -R 0:0 "$ROOT/opt/aios/app"
+chmod -R u=rwX,go=rX "$ROOT/opt/aios/app"
 chroot "$ROOT" python3 -m venv /opt/aios/venv
 chroot "$ROOT" /opt/aios/venv/bin/pip install --no-cache-dir --upgrade pip==26.2
 chroot "$ROOT" /opt/aios/venv/bin/pip install --no-cache-dir /opt/aios/app
@@ -115,6 +123,20 @@ mkdir -p "$ROOT/opt/aios/bin"
 chroot "$ROOT" cc -O3 -fopenmp /opt/aios/app/runtime/benchmark.c -o /opt/aios/bin/aios-benchmark
 chroot "$ROOT" /opt/aios/venv/bin/pip freeze > build/backend.lock
 chroot "$ROOT" /opt/aios/webui/bin/python -m nltk.downloader -d /opt/aios/nltk_data punkt punkt_tab averaged_perceptron_tagger_eng stopwords
+# The chat's document search embeds text with a small local model. The appliance
+# runs Open WebUI offline, so a model fetched on first use never arrived and every
+# uploaded file failed with "No embedding model is loaded". Ship it read-only.
+rm -rf "$ROOT/opt/aios/embedding"
+chroot "$ROOT" env -u HF_HUB_OFFLINE /opt/aios/webui/bin/python - <<'EMBED'
+from huggingface_hub import snapshot_download
+# A plain folder, referenced by its path: offline, Open WebUI refuses a partial
+# Hugging Face cache (it wants every ONNX and OpenVINO variant too).
+snapshot_download('sentence-transformers/all-MiniLM-L6-v2', local_dir='/opt/aios/embedding/all-MiniLM-L6-v2',
+                  allow_patterns=['*.json', 'model.safetensors', 'vocab.txt', '1_Pooling/*'])
+EMBED
+rm -rf "$ROOT/opt/aios/embedding/all-MiniLM-L6-v2/.cache"
+chroot "$ROOT" env HF_HUB_OFFLINE=1 /opt/aios/webui/bin/python -c "from sentence_transformers import SentenceTransformer; m = SentenceTransformer('/opt/aios/embedding/all-MiniLM-L6-v2', device='cpu'); assert m.encode(['offline check']).shape == (1, 384); print('embedding model verified offline')"
+chmod -R a+rX "$ROOT/opt/aios/embedding"
 chroot "$ROOT" id aios >/dev/null 2>&1 || chroot "$ROOT" useradd --system --home-dir /var/lib/aios --shell /usr/sbin/nologin aios
 chroot "$ROOT" id aios-webui >/dev/null 2>&1 || chroot "$ROOT" useradd --system --home-dir /var/lib/aios/webui --shell /usr/sbin/nologin aios-webui
 cp config/aios.yaml config/repositories.yaml "$ROOT/etc/aios/"
@@ -173,8 +195,7 @@ ln -sf /opt/aios/app/installer/console.sh "$ROOT/usr/local/bin/aios-console"
 mkdir -p "$ROOT/usr/local/sbin"
 ln -sf /opt/aios/app/installer/recovery-shell.sh "$ROOT/usr/local/bin/aios-recovery-shell"
 ln -sf /opt/aios/app/installer/bootstrap-recovery.sh "$ROOT/usr/local/sbin/aios-bootstrap-recovery"
-chroot "$ROOT" systemctl enable aios-nvidia-driver
-chroot "$ROOT" systemctl enable aios-firstboot aios-control-plane aios-runtime-manager aios-download-worker aios-platform aios-open-webui aios-console aios-local-console aios-serial-console aios-hardware-profiler.timer aios-repository-sync.timer aios-update-check.timer nginx nftables systemd-networkd systemd-resolved systemd-timesyncd
+chroot "$ROOT" systemctl enable $(grep -v '^#' config/enabled-units) nginx nftables systemd-networkd systemd-resolved systemd-timesyncd
 # Closed appliance: no login prompt on any other virtual terminal, no magic
 # SysRq keys; the physical console only offers the authenticated AIOS menu.
 mkdir -p "$ROOT/etc/systemd/logind.conf.d"
@@ -193,7 +214,7 @@ rm -f "$ROOT/etc/ssh/ssh_host_"* "$ROOT/etc/nginx/aios.key" "$ROOT/etc/nginx/aio
 rm -rf "$ROOT/etc/aios/secrets" "$ROOT/var/lib/aios"
 mkdir -p "$ROOT/var/lib/aios"
 chroot "$ROOT" apt-get clean
-rm -rf "$ROOT/var/lib/apt/lists/"* "$ROOT/usr/src/llama-build" "$ROOT/usr/src/llama.cpp-$LLAMA_COMMIT"
+rm -rf "$ROOT/var/lib/apt/lists/"*
 rm -rf "$ROOT/tmp/"* "$ROOT/var/log/"* "$ROOT/root/.cache"
 mkdir -p "$ROOT/var/log/nginx" "$ROOT/var/log/aios" "$ROOT/var/log/journal"
 chroot "$ROOT" systemctl set-default multi-user.target
@@ -213,7 +234,10 @@ mkfs.vfat -F32 -n AIOS-EFI "${LOOP}p1"
 mkfs.ext4 -F -L AIOS-ROOT -E lazy_itable_init=0,lazy_journal_init=0 "${LOOP}p2"
 mkfs.ext4 -F -L AIOS-DATA -E lazy_itable_init=0,lazy_journal_init=0 "${LOOP}p3"
 mount "${LOOP}p2" "$MOUNT"
-rsync -aHAXx --numeric-ids "$ROOT/" "$MOUNT/"
+# The engines' build trees stay in the cache for the next build and out of the
+# image: the engines load their libraries from /opt/aios, never from there.
+rsync -aHAXx --numeric-ids --exclude='/usr/src/*-build' --exclude='/usr/src/llama.cpp-*' \
+  --exclude='/usr/src/stable-diffusion.cpp-*' --exclude='/usr/src/whisper.cpp-*' "$ROOT/" "$MOUNT/"
 mkdir -p "$MOUNT/boot/efi" "$MOUNT/var/lib/aios"
 mount "${LOOP}p1" "$MOUNT/boot/efi"
 mount "${LOOP}p3" "$MOUNT/var/lib/aios"

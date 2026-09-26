@@ -4,11 +4,11 @@ Requirements: an x86-64 Intel/AMD machine with UEFI or legacy BIOS firmware, at 
 
 ## From the installer ISO (recommended)
 
-Download the `aios-installer-x86_64.iso.part-*` files and `aios-installer-x86_64.iso.sha256` from the [releases page](https://github.com/danieleghione/aios/releases), join and check them, then write the ISO to a USB stick or attach it as a virtual CD/DVD:
+Download the `aios-installer-1.12.4-x86_64.iso.part-*` files and `aios-installer-1.12.4-x86_64.iso.sha256` from the *Releases* page of the project repository, join and check them, then write the ISO to a USB stick or attach it as a virtual CD/DVD:
 
 ```bash
-cat aios-installer-x86_64.iso.part-0* > aios-installer-x86_64.iso
-sha256sum -c aios-installer-x86_64.iso.sha256
+cat aios-installer-1.12.4-x86_64.iso.part-0* > aios-installer-1.12.4-x86_64.iso
+sha256sum -c aios-installer-1.12.4-x86_64.iso.sha256
 ```
 
 The ISO boots on both UEFI and legacy BIOS. The guided installer starts on its own: it lists only the disks it can use (the boot medium and mounted disks are never offered), asks for language, keyboard, hostname, network, time zone, clock and optional recovery SSH, shows a summary and — once you confirm it — erases the chosen disk without asking again. It creates a BIOS boot partition, an ESP, a root and a data partition, unpacks the system, installs both `EFI/BOOT/BOOTX64.EFI` and GRUB for legacy BIOS, locks the boot entries and clears every generated identity and credential. The machine reboots by itself after ten seconds; remove the installation medium first.

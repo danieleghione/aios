@@ -142,3 +142,54 @@ def test_a_draft_installed_before_the_check_cannot_be_published_started_or_chatt
     assert started.status_code == 409 and 'draft' in started.json()['error']['message']
     from aios.app import unusable
     assert unusable(environment.one('SELECT * FROM installed_models WHERE id=?', (key,))) == DRAFT_MESSAGE
+
+
+def diffusion_conversion(tensors=516):
+    """What stable-diffusion.cpp's converter writes: tensors and no metadata at all."""
+    return b'GGUF' + struct.pack('<IQQ', 3, tensors, 0) + b'\0' * 64
+
+
+def test_a_gguf_without_architecture_is_not_a_language_model(tmp_path):
+    dims = providers.header_dimensions(diffusion_conversion())
+    assert dims == {'general.type': providers.NO_ARCHITECTURE, 'tensor_count': 516} and providers.complete(dims)
+    # A prefix cut before the metadata ends says nothing either way.
+    assert providers.header_dimensions(full_model()[:40]) == {}
+    path = tmp_path / 'flux.gguf'
+    body = b'GGUF' + struct.pack('<IQQ', 3, 1, 0) + text('model.diffusion.weight') + struct.pack('<IQIQ', 1, 1, 0, 0)
+    body += b'\0' * ((32 - len(body) % 32) % 32)
+    path.write_bytes(body + b'\0' * 32)
+    with pytest.raises(ValueError, match='names no model architecture'):
+        inspect_gguf(path)
+
+
+@pytest.mark.asyncio
+async def test_sync_leaves_diffusion_conversions_out_of_the_language_catalogue(environment, monkeypatch):
+    files = {'model-Q4_K_M.gguf': full_model(layers=8), 'hyper-flux.1-lite-8B-8step-q8_0.gguf': diffusion_conversion()}
+
+    async def listing(url, repo, *args, **kwargs):
+        if '/api/models?' in url:
+            return [{'id': 'someone/mixed-GGUF', 'createdAt': '2026-09-01'}]
+        return {'id': 'someone/mixed-GGUF', 'sha': 'rev', 'siblings': [{'rfilename': name, 'size': len(blob)} for name, blob in files.items()]}
+
+    async def prefix(url, repo, length=0):
+        return files[url.rsplit('/', 1)[-1]]
+    monkeypatch.setattr(providers, 'request_json', listing)
+    monkeypatch.setattr(providers, 'request_prefix', prefix)
+    monkeypatch.setattr(providers, 'validate_url', lambda *args, **kwargs: None)
+    repo = core.one("SELECT * FROM repositories WHERE name='Qwen (GGUF)'")
+    core.execute('UPDATE repositories SET config=? WHERE id=?', (core.encode({'publishers': ['someone'], 'search': 'GGUF'}), repo['id']))
+    await providers.sync(repo['id'])
+    listed = [json.loads(r['metadata'])['filename'] for r in core.rows('SELECT metadata FROM discovered_models WHERE repository_id=?', (repo['id'],))]
+    assert listed == ['model-Q4_K_M.gguf']
+
+
+def test_a_failed_download_of_a_file_no_longer_offered_is_cleaned_up(environment):
+    repo = core.one("SELECT id FROM repositories WHERE name='Qwen (GGUF)'")['id']
+    kept, gone = core.uid(), core.uid()
+    for key, state in ((kept, 'PAUSED'), (gone, 'FAILED')):
+        core.execute('INSERT INTO discovered_models VALUES (?,?,?,?,?,?,?)', (key, repo, key, 'r', '{}', 0, 0))
+        core.execute('INSERT INTO model_artifacts(id,url,size,sha256) VALUES (?,?,?,?)', (key, 'https://example.com/' + key, 1, None))
+        core.execute('INSERT INTO downloads(id,model_id,state,total,created_at,updated_at) VALUES (?,?,?,?,?,?)', (core.uid(), key, state, 1, 0, 0))
+    providers.prune(repo, set())
+    assert [r['id'] for r in core.rows('SELECT id FROM discovered_models WHERE repository_id=?', (repo,))] == [kept]
+    assert [r['model_id'] for r in core.rows('SELECT model_id FROM downloads')] == [kept]

@@ -1,4 +1,4 @@
-# AIOS 1.5 architecture
+# AIOS architecture
 
 AIOS is an x86-64 appliance based on Ubuntu 24.04 LTS (hardware enablement kernel), with no desktop, no mandatory SSH and no containers, bootable under both UEFI and legacy BIOS. The raw GPT disk carries a 256 MiB FAT32 ESP, a 10 GiB ext4 root, an ext4 data partition over the rest of the medium, and a 1 MiB BIOS boot partition in the space before the ESP, so the data partition stays last and can grow at boot.
 
@@ -6,11 +6,20 @@ NGINX exposes HTTPS on the LAN: `/` serves Open WebUI, `/admin/` the React porta
 
 SQLite in WAL mode avoids another daemon while keeping transactions, foreign keys, versioned migrations and consistent online backups. `schema.sql` holds the idempotent initial migration and the `schema_migrations` table. Models and archives never live inside the database. Sessions store only hashes of random tokens. Repository secrets are separate `0600` files; the database and backup directories are `0700`.
 
-The control plane records the desired state of each runtime; `aios-runtime-manager` owns the engine processes, language and image alike. That separation keeps management available during a crash or a long load. Version 1 allows one active model: the schema keeps separate instances for future extensions. `aios-download-worker` owns the persistent queue, the `.part` files, resume and backoff. `aios-platform` runs, as root, a closed set of validated operations; the backend never invokes arbitrary shell commands.
+The control plane records the desired state of each runtime; `aios-runtime-manager` owns the engine processes of every kind. That separation keeps management available during a crash or a long load. One model of each kind can be loaded at a time; when memory is short, loading one unloads a model of another kind that is not answering. `aios-download-worker` owns the persistent queue, the `.part` files, resume and backoff. `aios-platform` runs, as root, a closed set of validated operations; the backend never invokes arbitrary shell commands.
 
 Open WebUI uses a dedicated virtualenv, a separate user and persistent data in `/var/lib/aios/webui`. It has no access to the GGUF weights, to administrative secrets or to the control plane database. Its OpenAI endpoint and the local key are configured on first boot. The downstream distribution keeps upstream code, frontend and licence, applying explicit patches to dependency constraints where needed: see `config/openwebui-security-overrides.json` and the provenance file generated during the build.
 
-Two inference engines are compiled from pinned sources, each with dynamic ggml backends, every x86 CPU variant and Vulkan, and each in its own prefix so neither can load the other's backends: llama.cpp in `/opt/aios/runtime` (language models, loopback port 8090) and stable-diffusion.cpp in `/opt/aios/imaging` (diffusion models, loopback port 8091). The runtime manager owns both kinds of process and allows one model of each kind at a time. llama.cpp is compiled with `GGML_NATIVE=OFF`, dynamic backends, every x86 CPU variant available in the pinned commit and the Vulkan backend. Instruction selection happens inside the upstream runtime. Before each start the runtime manager asks llama.cpp which GPUs it can use and passes the chosen ones explicitly, or `--device none`; `aios-nvidia-driver` installs the NVIDIA kernel modules that match the cards at boot. See [GPU acceleration](gpu.md). No remote model is executed as code, and `trust_remote_code` is never used in the AIOS inference path.
+Three ggml projects are compiled from pinned sources, each with dynamic backends, every x86 CPU variant and Vulkan, and each in its own prefix so none can load another's backends. They run four kinds of model, each on its own loopback port:
+
+| Kind | Engine | Prefix | Port |
+|---|---|---|---|
+| Language | llama.cpp `llama-server` | `/opt/aios/runtime` | 8090 |
+| Image | stable-diffusion.cpp `sd-server` | `/opt/aios/imaging` | 8091 |
+| Speech to text | whisper.cpp `whisper-server` | `/opt/aios/voice` | 8092 |
+| Text to speech | llama.cpp `llama-tts`, behind a small service | `/opt/aios/runtime` | 8094 |
+
+One table in the runtime manager (`ENGINES` in `runtime.py`) says, for each kind, which models it runs, its port, how it starts and how it reports that it is ready. The embedding model shipped for the chat's documents also answers `/v1/embeddings` for API clients, on port 8093: systemd starts it on the first request and it exits after ten minutes without one. llama.cpp is compiled with `GGML_NATIVE=OFF`, dynamic backends, every x86 CPU variant available in the pinned commit and the Vulkan backend. Instruction selection happens inside the upstream runtime. Before each start the runtime manager asks llama.cpp which GPUs it can use and passes the chosen ones explicitly, or `--device none`; `aios-nvidia-driver` installs the NVIDIA kernel modules that match the cards at boot. See [GPU acceleration](gpu.md). No remote model is executed as code, and `trust_remote_code` is never used in the AIOS inference path.
 
 The audit log has SQLite triggers that refuse UPDATE and DELETE, plus a SHA256 chain. That guarantees append-only at the application level; it does not survive a root compromise or someone replacing the whole database file. Protect physical and hypervisor console access.
 

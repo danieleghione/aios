@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 import psutil
-from . import accelerators, imaging
+from . import __version__, accelerators, imaging, speech, voice
 from .core import DATA, atomic_write, encode, execute, now, uid
 
 GIB = 1024 ** 3
@@ -41,17 +41,22 @@ def profile(probe=True):
             cpu[key.strip()] = value.strip()
     memory = psutil.virtual_memory()
     meminfo = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
-    disks = []
-    for part in psutil.disk_partitions():
+    disks = {}
+    # A service's sandbox mounts writable folders again (/tmp, /var/log/aios...):
+    # one entry per device, under its shortest mount point.
+    for part in sorted(psutil.disk_partitions(), key=lambda p: (len(p.mountpoint), p.mountpoint)):
+        if part.device in disks:
+            continue
         try:
-            disks.append({'device': part.device, 'mount': part.mountpoint, 'filesystem': part.fstype, **psutil.disk_usage(part.mountpoint)._asdict()})
+            disks[part.device] = {'device': part.device, 'mount': part.mountpoint, 'filesystem': part.fstype, **psutil.disk_usage(part.mountpoint)._asdict()}
         except OSError:
             continue
+    disks = list(disks.values())
     temps = {key: [x._asdict() for x in values] for key, values in psutil.sensors_temperatures().items()}
     topology = [dict(x.split(':', 1) for x in block.splitlines() if ':' in x) for block in Path('/proc/cpuinfo').read_text().split('\n\n') if block.strip()]
     sockets = {next((v.strip() for k, v in item.items() if k.strip() == 'physical id'), '0') for item in topology}
     flags = cpu.get('flags', '').split()
-    result = {'hostname': socket.gethostname(), 'aios_version': '1.5.1', 'kernel': platform.release(), 'vendor': cpu.get('vendor_id'), 'model': cpu.get('model name'), 'sockets': len(sockets), 'physical_cores': psutil.cpu_count(logical=False), 'logical_threads': psutil.cpu_count(), 'frequency_mhz': psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None, 'isa': [f for f in flags if any(f.startswith(s) for s in ('avx', 'fma', 'amx', 'sse', 'vnni'))], 'numa_nodes': {p.name: (p / 'cpulist').read_text().strip() for p in Path('/sys/devices/system/node').glob('node[0-9]*')}, 'cache': command(['lscpu', '--caches', '--json']), 'ram': memory._asdict(), 'hugepages': {k: v.strip() for k, v in meminfo.items() if 'Huge' in k}, 'hugepage_sizes': {p.name: {f.name: f.read_text().strip() for f in p.iterdir() if f.name in ('nr_hugepages', 'free_hugepages', 'surplus_hugepages')} for p in Path('/sys/kernel/mm/hugepages').glob('hugepages-*')}, 'disks': disks, 'model_storage': shutil.disk_usage(DATA)._asdict(), 'network': {k: [x._asdict() for x in v] for k, v in psutil.net_if_addrs().items()}, 'network_counters': psutil.net_io_counters()._asdict(), 'temperature': temps, 'virtualization': command(['systemd-detect-virt']), 'load': os.getloadavg(), 'cpu_percent': psutil.cpu_percent(interval=0.1), 'runtime_version': command([os.environ.get('AIOS_LLAMA', '/opt/aios/runtime/bin/llama-server'), '--version']), 'accelerators': gpu_devices() if probe else accelerators.cached(), 'nvidia_driver': accelerators.nvidia_driver(), 'updated_at': now()}
+    result = {'hostname': socket.gethostname(), 'aios_version': __version__, 'kernel': platform.release(), 'vendor': cpu.get('vendor_id'), 'model': cpu.get('model name'), 'sockets': len(sockets), 'physical_cores': psutil.cpu_count(logical=False), 'logical_threads': psutil.cpu_count(), 'frequency_mhz': psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None, 'isa': [f for f in flags if any(f.startswith(s) for s in ('avx', 'fma', 'amx', 'sse', 'vnni'))], 'numa_nodes': {p.name: (p / 'cpulist').read_text().strip() for p in Path('/sys/devices/system/node').glob('node[0-9]*')}, 'cache': command(['lscpu', '--caches', '--json']), 'ram': memory._asdict(), 'hugepages': {k: v.strip() for k, v in meminfo.items() if 'Huge' in k}, 'hugepage_sizes': {p.name: {f.name: f.read_text().strip() for f in p.iterdir() if f.name in ('nr_hugepages', 'free_hugepages', 'surplus_hugepages')} for p in Path('/sys/kernel/mm/hugepages').glob('hugepages-*')}, 'disks': disks, 'model_storage': shutil.disk_usage(DATA)._asdict(), 'network': {k: [x._asdict() for x in v] for k, v in psutil.net_if_addrs().items()}, 'network_counters': psutil.net_io_counters()._asdict(), 'temperature': temps, 'virtualization': command(['systemd-detect-virt']), 'load': os.getloadavg(), 'cpu_percent': psutil.cpu_percent(interval=0.1), 'runtime_version': command([os.environ.get('AIOS_LLAMA', '/opt/aios/runtime/bin/llama-server'), '--version']), 'accelerators': gpu_devices() if probe else accelerators.cached(), 'nvidia_driver': accelerators.nvidia_driver(), 'updated_at': now()}
     atomic_write(DATA / 'system/hardware-profile.json', encode(result), 0o644)
     return result
 
@@ -139,6 +144,67 @@ def image_compatibility(metadata, hw):
             'architecture': metadata.get('family', 'unknown'), 'kind': 'image'}
 
 
+def speech_compatibility(metadata, hw):
+    """A speech model is judged on its weights and the engine's working memory:
+    transcription reads the audio once, with no context to size."""
+    size = int(metadata.get('size') or 0)
+    required = speech.estimated_memory(metadata)
+    gpus = accelerators.select('auto', hw.get('accelerators') or [])
+    vram = sum(max(0, d['total'] - accelerators.VRAM_MARGIN) for d in gpus if d['type'] != 'integrated')
+    usable = max(0, hw['ram']['total'] - 1536 * 1024 ** 2)
+    reasons = [f'Speech model {size / GIB:.2f} GiB', 'About 0.5 GiB for the engine while it transcribes']
+    if gpus:
+        reasons.append('GPU acceleration: ' + ', '.join(d['description'] for d in gpus))
+    else:
+        reasons.append('No GPU: transcription runs on the CPU, a few times faster than real time on the smaller models')
+    rating = 'OPTIMAL'
+    if not size:
+        rating = 'INCOMPATIBLE'
+        reasons.append('Unknown size')
+    elif required > usable + vram:
+        rating = 'NOT_RECOMMENDED'
+        reasons.append('The model and its buffers do not fit in memory')
+    elif required > hw['ram']['available'] * .9 + vram:
+        rating = 'LIMITED'
+        reasons.append('Insufficient currently available memory; stop other workloads')
+    elif required > (usable + vram) * .6:
+        rating = 'COMPATIBLE'
+    if size > hw['model_storage']['free']:
+        rating = 'INCOMPATIBLE'
+        reasons.append('Insufficient storage')
+    return {'classification': rating, 'reasons': reasons, 'estimated_ram': required, 'kv_bytes': 0, 'context': 0,
+            'architecture': 'whisper', 'kind': 'speech'}
+
+
+def voice_compatibility(metadata, hw):
+    """A voice model is judged on its backbone, the repacked copy llama.cpp keeps
+    for the CPU, its codec and the working buffers of one text."""
+    size = int(metadata.get('size') or 0)
+    codec = sum(int(c.get('size') or 0) for c in voice.components(metadata))
+    required = voice.estimated_memory(metadata)
+    usable = max(0, hw['ram']['total'] - 1536 * 1024 ** 2)
+    reasons = [f'Voice model {size / GIB:.2f} GiB with a {codec / GIB:.2f} GiB codec',
+               f'About {required / GIB:.1f} GiB while it speaks, nothing between texts',
+               'On the CPU a sentence takes a few times its own length to speak']
+    rating = 'OPTIMAL'
+    if not size or not codec:
+        rating = 'INCOMPATIBLE'
+        reasons.append('Unknown size' if not size else 'The codec is missing')
+    elif required > usable:
+        rating = 'NOT_RECOMMENDED'
+        reasons.append('The model and its buffers do not fit in memory')
+    elif required > hw['ram']['available'] * .9:
+        rating = 'LIMITED'
+        reasons.append('Insufficient currently available memory; stop other workloads')
+    elif required > usable * .6:
+        rating = 'COMPATIBLE'
+    if size + codec > hw['model_storage']['free']:
+        rating = 'INCOMPATIBLE'
+        reasons.append('Insufficient storage')
+    return {'classification': rating, 'reasons': reasons, 'estimated_ram': required, 'kv_bytes': 0, 'context': 0,
+            'architecture': metadata.get('architecture', 'unknown'), 'kind': 'voice'}
+
+
 def resident_limit(hw):
     """Largest weights file that can stay entirely in memory next to the appliance's
     own services (about 1.25 GiB measured on a 3 GiB VM with Open WebUI running)."""
@@ -157,6 +223,10 @@ def compatibility(metadata, context=4096, hw=None):
     hw = hw or resources()
     if imaging.is_image_model(metadata):
         return image_compatibility(metadata, hw)
+    if speech.is_speech_model(metadata):
+        return speech_compatibility(metadata, hw)
+    if voice.is_voice_model(metadata):
+        return voice_compatibility(metadata, hw)
     size = int(metadata.get('size') or 0)
     raw = metadata.get('gguf') or {}
     arch = raw.get('general.architecture', metadata.get('architecture', 'unknown'))
@@ -190,8 +260,15 @@ def compatibility(metadata, context=4096, hw=None):
     # A vision projector is read into memory whole, beside the language weights.
     projector = metadata.get('projector') if isinstance(metadata.get('projector'), dict) else {}
     projector_size = projector.get('size') if isinstance(projector.get('size'), int) and not isinstance(projector.get('size'), bool) else 0
-    required = int(size * 0.5 + kv + projector_size + 192 * 1024 ** 2)
     gpus = accelerators.select('auto', hw.get('accelerators') or [])
+    # An integrated GPU copies the layers it runs into buffers carved out of the
+    # same RAM, and those pages cannot be evicted and re-read like the mapped file:
+    # count the weights whole there, instead of the half that mapping allows.
+    shared = bool(gpus) and all(d['type'] == 'integrated' for d in gpus)
+    required = int(size * (1.0 if shared else 0.5) + kv + projector_size + 192 * 1024 ** 2)
+    # Everything resident: what a model needs to answer at full speed, without
+    # reading evicted weights back from disk on every token.
+    resident = int(size + kv + projector_size + 192 * 1024 ** 2)
     # Discrete GPU memory takes layers off the RAM; an integrated GPU shares it.
     vram = sum(max(0, d['total'] - accelerators.VRAM_MARGIN) for d in gpus if d['type'] != 'integrated')
     usable = max(0, hw['ram']['total'] - 1536 * 1024 ** 2) + vram
@@ -200,7 +277,7 @@ def compatibility(metadata, context=4096, hw=None):
         reasons.append(f'Image input: vision projector {projector_size / GIB:.2f} GiB')
     if gpus:
         names = ', '.join(d['description'] for d in gpus)
-        reasons.append(f'GPU acceleration: {names}' + (f' (+{vram / GIB:.1f} GiB of GPU memory)' if vram else ' (shares system memory)'))
+        reasons.append(f'GPU acceleration: {names}' + (f' (+{vram / GIB:.1f} GiB of GPU memory)' if vram else ' (shares system memory: the weights are counted whole)'))
     rating = 'OPTIMAL'
     if not size or metadata.get('format', 'GGUF') != 'GGUF':
         rating = 'INCOMPATIBLE'
@@ -216,6 +293,10 @@ def compatibility(metadata, context=4096, hw=None):
     elif required > hw['ram']['available'] * .9 + vram:
         rating = 'LIMITED'
         reasons.append('Insufficient currently available memory; stop other workloads')
+    elif resident > usable:
+        # It loads, but part of the weights is read back from disk as it answers.
+        rating = 'LIMITED'
+        reasons.append(f'Not all of the model fits in memory at once ({resident / GIB:.1f} GiB needed, {usable / GIB:.1f} GiB usable): answers will be slow')
     elif required > usable * .6 or (hw['physical_cores'] or 1) < 4:
         rating = 'COMPATIBLE'
     if size > hw['model_storage']['free']:

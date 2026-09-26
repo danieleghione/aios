@@ -1,6 +1,6 @@
 # Development and tests
 
-Layout: `backend/aios` holds the FastAPI control plane, the schema, authentication, the hardware profiler, repository providers, the downloader, the runtime manager and the privileged broker; `frontend-admin` holds the React/TypeScript portal; `config`, `systemd`, `installer`, `scripts` and `branding` describe the appliance itself. `build` and `dist` are artefacts and stay out of Git, except `build/versions.env`.
+Layout: `backend/aios` holds the FastAPI control plane, the schema, authentication, the hardware profiler, repository providers (`providers/`, one module per provider beside the shared, validated requests), the downloader, the runtime manager and the privileged broker; `frontend-admin` holds the React/TypeScript portal; `config`, `systemd`, `installer`, `scripts` and `branding` describe the appliance itself. `build` and `dist` are artefacts and stay out of Git, except `build/versions.env`.
 
 ```bash
 ./scripts/setup-host.sh

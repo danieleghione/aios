@@ -9,7 +9,7 @@ import time
 from urllib.parse import urljoin, urlparse
 import httpx
 from .core import DATA, audit, encode, execute, now, one, projector_path, rows, setting
-from . import imaging
+from . import alerts, imaging, revisions, speech, voice
 from .gguf import inspect_gguf, inspect_projector
 from .providers import credential, projector_for, request_target
 
@@ -35,6 +35,8 @@ def companions(model_id, metadata):
         wanted.append(('mmproj', projector, projector_path(model_id)))
     for component in imaging.components(metadata):
         wanted.append((component['role'], component, imaging.component_path(model_id, component['role'], component['filename'])))
+    for component in voice.components(metadata):
+        wanted.append((component['role'], component, voice.component_path(model_id, component['role'])))
     return wanted
 
 
@@ -107,14 +109,19 @@ async def download(job):
     try:
         metadata = json.loads(model['metadata'])
         image = imaging.is_image_model(metadata)
+        speech_model = speech.is_speech_model(metadata)
+        voice_model = voice.is_voice_model(metadata)
         # A model installed before its companions were tracked needs only those.
         installed = one('SELECT id FROM installed_models WHERE id=?', (model['id'],)) is not None
-        target = imaging.model_path(model['id'], metadata.get('filename', '')) if image else DATA / 'models' / (model['id'] + '.gguf')
+        target = (imaging.model_path(model['id'], metadata.get('filename', '')) if image
+                  else speech.model_path(model['id']) if speech_model
+                  else DATA / 'models' / (model['id'] + '.gguf'))
         pending = [(role, spec, destination) for role, spec, destination in companions(model['id'], metadata) if not destination.exists()]
         expected = 0 if installed else model['size']
         total = expected + sum(int(spec['size']) for _, spec, _ in pending)
         if not total:
             execute("UPDATE downloads SET state='INSTALLED',speed=0,eta=0,updated_at=? WHERE id=?", (now(), job['id']))
+            alerts.resolve('download:' + job['id'])
             return
         if total > setting('max_model_bytes', 1024 ** 4):
             raise ValueError('Model exceeds configured size limit')
@@ -144,8 +151,18 @@ async def download(job):
                 raise ValueError('SHA256 mismatch')
             # A diffusion checkpoint is not a GGUF language model; its structure is
             # checked by the engine when it loads it, the checksum by us.
-            record = {'kind': 'image', 'family': metadata.get('family'), 'components': [c['role'] for c in imaging.components(metadata)]} \
-                if image else await asyncio.to_thread(inspect_gguf, part)
+            if image:
+                record = {'kind': 'image', 'family': metadata.get('family'), 'components': [c['role'] for c in imaging.components(metadata)]}
+            elif speech_model:
+                # A whisper model is a ggml file of its own shape; the checksum is
+                # what proves it arrived whole.
+                record = {'kind': 'speech', 'family': 'whisper'}
+            elif voice_model:
+                # A voice backbone speaks only with its codec, so the language
+                # model checks do not apply; llama-tts reads both.
+                record = {'kind': 'voice', 'family': metadata.get('family'), 'components': ['codec']}
+            else:
+                record = await asyncio.to_thread(inspect_gguf, part)
         note = None
         for (role, spec, destination), companion_part in zip(pending, parts[1:]):
             try:
@@ -169,11 +186,14 @@ async def download(job):
             os.replace(part, target)
             execute('INSERT INTO installed_models(id,path,sha256,installed_at,state,gguf) VALUES (?,?,?,?,?,?)', (model['id'], str(target), sha, now(), 'INSTALLED', encode(record)))
         execute("UPDATE downloads SET state='INSTALLED',speed=0,eta=0,error=?,updated_at=? WHERE id=?", (note, now(), job['id']))
+        alerts.resolve('download:' + job['id'])
+        if job.get('replaces') and not installed:
+            revisions.hand_over(job['replaces'], model['id'])
         if installed:
             audit('download-worker', 'companions_installed', model['id'], {'roles': [role for role, _, _ in pending]})
         else:
             audit('download-worker', 'model_installed', model['id'], {'sha256': sha, 'upstream_checksum': bool(model['sha256']),
-                                                                      'kind': 'image' if image else 'text', 'companions': [role for role, _, _ in pending]})
+                                                                      'kind': 'image' if image else 'speech' if speech_model else 'voice' if voice_model else 'text', 'companions': [role for role, _, _ in pending]})
     except (ValueError, OSError, httpx.HTTPError, KeyError, sqlite3.Error) as exc:
         attempts = job['attempts'] + 1
         # A busy or momentarily unavailable database is contention, not a bad
@@ -206,6 +226,9 @@ async def worker():
                     except Exception as exc:
                         logging.warning('download %s failed: %s', key, describe(exc))
                         execute("UPDATE downloads SET state='FAILED',error=? WHERE id=?", (describe(exc), key))
+                        failed = one('SELECT d.model_id,m.metadata FROM downloads d LEFT JOIN discovered_models m ON m.id=d.model_id WHERE d.id=?', (key,))
+                        name = json.loads(failed['metadata']).get('display_name') if failed and failed['metadata'] else key
+                        alerts.raise_alert('download:' + key, 'WARNING', f'Download of {name} failed: {describe(exc)}')
             concurrency = min(8, max(1, setting('download_concurrency', 2)))
             for job in rows("SELECT * FROM downloads WHERE state='QUEUED' AND next_retry<=? ORDER BY created_at LIMIT ?", (now(), max(0, concurrency - len(active)))):
                 if job['id'] in active:
